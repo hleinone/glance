@@ -1,0 +1,7 @@
+Transport mode pictograms from HSL's journey planner, digitransit-ui:
+https://github.com/HSLdevcom/digitransit-ui (app/assets/icons/default/).
+Copyright 2015 Finnish Transport Agency and Helsinki Regional Transport
+Authority HSL; dual-licensed under the EUPL v1.2 and AGPLv3 (see COPYING
+and LICENSE-EUPL.txt). src/ holds the original SVGs; the PNGs are
+rendered from them unchanged except for cropping and scaling, by
+tools/build_hsl_icons.py.

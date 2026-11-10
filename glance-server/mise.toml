@@ -1,0 +1,45 @@
+# Server development tools and tasks (`mise tasks` lists them). mise creates
+# and activates .venv here, so `python` is the venv's (with Pillow) in this
+# folder. The Raspberry Pi doesn't use mise: it runs Debian's Python 3.13 and
+# Pillow, set up by deploy/deploy.sh.
+
+[tools]
+python = "3.13"
+
+[env]
+_.python.venv = { path = ".venv", create = true }
+
+[tasks.setup]
+description = "Install the Python packages into .venv"
+run = "pip install --quiet --disable-pip-version-check -r requirements.txt"
+
+[tasks.test]
+description = "Run the tests"
+run = "python -m unittest discover -s tests"
+
+[tasks.serve]
+description = "Serve locally: preview at http://localhost:8080/"
+run = "python -m glance serve"
+
+[tasks.render]
+description = "Render one image to glance.png"
+run = "python -m glance render"
+
+[tasks.stops]
+description = "Search HSL stops by name: mise run stops Pasila"
+run = "python -m glance stops"
+
+[tasks.deploy]
+description = "Run the tests, then deploy to the Raspberry Pi and restart it"
+depends = ["test"]
+# The target (user@host) is environment-specific: set GLANCE_PI in
+# mise.local.toml (git-ignored; see mise.local.toml.example).
+run = 'deploy/deploy.sh "${GLANCE_PI:?set GLANCE_PI (user@host) in mise.local.toml, see mise.local.toml.example}"'
+
+[tasks.screenshot]
+description = "Render the README screenshot (../docs/screenshot.png) from sample data"
+run = "python tools/make_screenshot.py"
+
+[tasks.icons]
+description = "Rebuild the FMI and HSL icon PNGs (macOS only)"
+run = ["python tools/build_fmi_icons.py", "python tools/build_hsl_icons.py"]

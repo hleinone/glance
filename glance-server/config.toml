@@ -1,0 +1,109 @@
+# Glance configuration. Secrets do not go here: put the Digitransit key in
+# config.local.toml (git-ignored, overrides this file):
+#
+#   [digitransit]
+#   key = "..."
+#
+# or set the GLANCE_DIGITRANSIT_KEY environment variable.
+
+language = "fi"               # "en" or "fi"
+timezone = "Europe/Helsinki"
+
+[location]
+# Placeholder: Pasila. Put your own coordinates in config.local.toml.
+lat = 60.1987
+lon = 24.9327
+
+[server]
+# The server has no login: anyone on the network it listens on can see the
+# dashboard. Keep it on the home network; don't forward the port.
+host = "0.0.0.0"
+port = 8080
+# Requests must name the server by its IP address, a single-label name
+# ("raspberrypi"), a .local name or localhost; others are refused, so a web
+# page elsewhere can't read the dashboard through a browser at home (DNS
+# rebinding). If your network gives the server another name, list it here:
+# hostnames = ["glance.home.example"]
+
+[weather]
+refresh_minutes = 15
+# Show a "weather is old" warning in the status bar after this many minutes
+# without a successful fetch.
+stale_after_minutes = 45
+
+[digitransit]
+# Departures are polled once a minute, this many seconds before the minute
+# changes, so they are fresh when the device wakes just after it.
+poll_lead_seconds = 15
+# A button press (?refresh=1) refetches, but not more often than this.
+min_refresh_seconds = 10
+# Show a "departures are old" warning after this many minutes without a fetch.
+stale_after_minutes = 5
+
+[device]
+# Each image response tells the device how long to sleep (X-Glance-Sleep
+# header, seconds). It wakes on the minutes of the schedule below (multiples
+# of the interval since midnight, e.g. :00 :05 :10 for 5), arriving this many
+# seconds after the minute changes so the clock on screen is right.
+wake_offset_seconds = 2
+# Interval (minutes) when no schedule rule matches.
+wake_interval_minutes = 5
+
+# Wake schedule: the first matching rule wins. days: "weekdays", "weekend",
+# "all" or a list like ["mon", "fri"], of the moment itself (00:00-06:00 on a
+# Saturday counts as Saturday). "to" is exclusive; a rule may run past
+# midnight (from 23:00 to 06:00). With an interval over 1 minute, departures
+# show clock times (14.32) instead of minutes, since countdowns would go stale.
+
+# An example; put your own schedule in config.local.toml (a [[device.schedule]]
+# list there replaces this one entirely).
+
+[[device.schedule]]  # weekday mornings: every minute
+days = "weekdays"
+from = "07:00"
+to = "09:00"
+every = 1
+
+[[device.schedule]]  # nights: every 15 minutes
+days = "all"
+from = "23:00"
+to = "06:00"
+every = 15
+
+# Otherwise every wake_interval_minutes (5).
+
+[battery]
+# What the device reads (mV) for a full battery. The percentage uses a generic
+# LiPo curve that is full at 4200; a real device reads less when full (the
+# cell settles after charging, and its ADC reads a little low), so set this to
+# what yours shows when fully charged (see cache/battery.csv on the server).
+full_mv = 4200
+
+[cache]
+dir = "cache"
+
+# Stop widgets, left to right (up to three).
+#   name   = optional display name; defaults to HSL's name for the stop. Set it
+#            when two widgets would share a name (e.g. trams and buses at
+#            the same station) or HSL's name is too long.
+#   codes  = stop codes as on the stop sign, e.g. ["H0665"]; list several
+#            (e.g. both platforms) to merge them into one widget. Look them
+#            up with:  python -m glance stops "Pasila"
+#            (Digitransit ids like "HSL:1174411" also work, as `ids`.)
+#   routes = optional filter, e.g. ["7", "9"]; omit for all routes
+# A stop without codes (or with no key configured) shows placeholder departures.
+
+# Example stops at Pasila. Put your own in config.local.toml: a [[stops]]
+# list there replaces this one entirely.
+
+[[stops]]
+name = "Pasilan asema, ratikat"
+codes = ["H0665", "H0664"]
+
+[[stops]]
+name = "Pasilan asema, bussit"
+codes = ["H2100", "H2101"]
+
+[[stops]]
+name = "Pasila, junat"
+codes = ["H0086"]

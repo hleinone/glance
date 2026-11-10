@@ -1,0 +1,871 @@
+{
+ "data": {
+  "stops": [
+   {
+    "gtfsId": "HSL:1174411",
+    "stoptimesWithoutPatterns": [
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 83340,
+      "realtimeDeparture": 83425,
+      "realtime": true,
+      "headsign": "Länsisatama via Sörnäinen (M)",
+      "trip": {
+       "tripHeadsign": "Länsisatama",
+       "route": {
+        "shortName": "7",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84060,
+      "realtimeDeparture": 84060,
+      "realtime": false,
+      "headsign": "Nihti via Kalasatama",
+      "trip": {
+       "tripHeadsign": "Nihti",
+       "route": {
+        "shortName": "13",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84240,
+      "realtimeDeparture": 84240,
+      "realtime": false,
+      "headsign": "Länsisatama via Kallio",
+      "trip": {
+       "tripHeadsign": "Länsisatama",
+       "route": {
+        "shortName": "9",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84480,
+      "realtimeDeparture": 84480,
+      "realtime": false,
+      "headsign": "Länsisatama via Sörnäinen (M)",
+      "trip": {
+       "tripHeadsign": "Länsisatama",
+       "route": {
+        "shortName": "7",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84600,
+      "realtimeDeparture": 84561,
+      "realtime": true,
+      "headsign": "Messukeskus via Expo Centre",
+      "trip": {
+       "tripHeadsign": "Messukeskus",
+       "route": {
+        "shortName": "2",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85260,
+      "realtimeDeparture": 85260,
+      "realtime": false,
+      "headsign": "Nihti via Kalasatama",
+      "trip": {
+       "tripHeadsign": "Nihti",
+       "route": {
+        "shortName": "13",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85440,
+      "realtimeDeparture": 85440,
+      "realtime": false,
+      "headsign": "Länsisatama via Kallio",
+      "trip": {
+       "tripHeadsign": "Länsisatama",
+       "route": {
+        "shortName": "9",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85680,
+      "realtimeDeparture": 85680,
+      "realtime": false,
+      "headsign": "Länsisatama via Sörnäinen (M)",
+      "trip": {
+       "tripHeadsign": "Länsisatama",
+       "route": {
+        "shortName": "7",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85800,
+      "realtimeDeparture": 85800,
+      "realtime": false,
+      "headsign": "Messukeskus via Expo Centre",
+      "trip": {
+       "tripHeadsign": "Messukeskus",
+       "route": {
+        "shortName": "2",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 86460,
+      "realtimeDeparture": 86460,
+      "realtime": false,
+      "headsign": "Nihti via Kalasatama",
+      "trip": {
+       "tripHeadsign": "Nihti",
+       "route": {
+        "shortName": "13",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 86580,
+      "realtimeDeparture": 86580,
+      "realtime": false,
+      "headsign": "Länsisatama via Kallio",
+      "trip": {
+       "tripHeadsign": "Länsisatama",
+       "route": {
+        "shortName": "9",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 86820,
+      "realtimeDeparture": 86820,
+      "realtime": false,
+      "headsign": "Länsisatama via Sörnäinen (M)",
+      "trip": {
+       "tripHeadsign": "Länsisatama",
+       "route": {
+        "shortName": "7",
+        "mode": "TRAM"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "gtfsId": "HSL:1174410",
+    "stoptimesWithoutPatterns": [
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 83520,
+      "realtimeDeparture": 83513,
+      "realtime": true,
+      "headsign": "Länsi-Pasila",
+      "trip": {
+       "tripHeadsign": "Länsi-Pasila",
+       "route": {
+        "shortName": "13",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 83940,
+      "realtimeDeparture": 83940,
+      "realtime": false,
+      "headsign": "Olympiaterm. via Ooppera",
+      "trip": {
+       "tripHeadsign": "Olympiaterminaali",
+       "route": {
+        "shortName": "2",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84300,
+      "realtimeDeparture": 84051,
+      "realtime": true,
+      "headsign": "Ilmala",
+      "trip": {
+       "tripHeadsign": "Ilmala",
+       "route": {
+        "shortName": "9",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84060,
+      "realtimeDeparture": 84147,
+      "realtime": true,
+      "headsign": "Meilahden sairaala",
+      "trip": {
+       "tripHeadsign": "Meilahden sairaala",
+       "route": {
+        "shortName": "7",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84540,
+      "realtimeDeparture": 84540,
+      "realtime": false,
+      "headsign": "Ruskeasuo",
+      "trip": {
+       "tripHeadsign": "Ruskeasuo",
+       "route": {
+        "shortName": "H",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84600,
+      "realtimeDeparture": 84600,
+      "realtime": false,
+      "headsign": "Ruskeasuo",
+      "trip": {
+       "tripHeadsign": "Ruskeasuo",
+       "route": {
+        "shortName": "H",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84720,
+      "realtimeDeparture": 84720,
+      "realtime": false,
+      "headsign": "Länsi-Pasila",
+      "trip": {
+       "tripHeadsign": "Länsi-Pasila",
+       "route": {
+        "shortName": "13",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85140,
+      "realtimeDeparture": 85140,
+      "realtime": false,
+      "headsign": "Olympiaterm. via Ooppera",
+      "trip": {
+       "tripHeadsign": "Olympiaterminaali",
+       "route": {
+        "shortName": "2",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85200,
+      "realtimeDeparture": 85193,
+      "realtime": true,
+      "headsign": "Meilahden sairaala",
+      "trip": {
+       "tripHeadsign": "Meilahden sairaala",
+       "route": {
+        "shortName": "7",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85440,
+      "realtimeDeparture": 85440,
+      "realtime": false,
+      "headsign": "Ilmala",
+      "trip": {
+       "tripHeadsign": "Ilmala",
+       "route": {
+        "shortName": "9",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85920,
+      "realtimeDeparture": 85920,
+      "realtime": false,
+      "headsign": "Länsi-Pasila",
+      "trip": {
+       "tripHeadsign": "Länsi-Pasila",
+       "route": {
+        "shortName": "13",
+        "mode": "TRAM"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 86340,
+      "realtimeDeparture": 86340,
+      "realtime": false,
+      "headsign": "Olympiaterm. via Ooppera",
+      "trip": {
+       "tripHeadsign": "Olympiaterminaali",
+       "route": {
+        "shortName": "2",
+        "mode": "TRAM"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "gtfsId": "HSL:1174128",
+    "stoptimesWithoutPatterns": [
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 83280,
+      "realtimeDeparture": 83601,
+      "realtime": true,
+      "headsign": "Herttoniemi(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Herttoniemi(M)",
+       "route": {
+        "shortName": "59",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 83700,
+      "realtimeDeparture": 83853,
+      "realtime": true,
+      "headsign": "Herttoniemi(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Herttoniemi (M)",
+       "route": {
+        "shortName": "510",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84360,
+      "realtimeDeparture": 84360,
+      "realtime": false,
+      "headsign": "Itäkeskus(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Itäkeskus(M)",
+       "route": {
+        "shortName": "500",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84540,
+      "realtimeDeparture": 84579,
+      "realtime": true,
+      "headsign": "Herttoniemi(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Herttoniemi(M)",
+       "route": {
+        "shortName": "59",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84900,
+      "realtimeDeparture": 84958,
+      "realtime": true,
+      "headsign": "Herttoniemi(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Herttoniemi (M)",
+       "route": {
+        "shortName": "510",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85500,
+      "realtimeDeparture": 85500,
+      "realtime": false,
+      "headsign": "Itäkeskus(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Itäkeskus(M)",
+       "route": {
+        "shortName": "500",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 86100,
+      "realtimeDeparture": 86100,
+      "realtime": false,
+      "headsign": "Herttoniemi(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Herttoniemi (M)",
+       "route": {
+        "shortName": "510",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 86520,
+      "realtimeDeparture": 86520,
+      "realtime": false,
+      "headsign": "Herttoniemi(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Herttoniemi(M)",
+       "route": {
+        "shortName": "59",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 86700,
+      "realtimeDeparture": 86700,
+      "realtime": false,
+      "headsign": "Itäkeskus(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Itäkeskus(M)",
+       "route": {
+        "shortName": "500",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 87900,
+      "realtimeDeparture": 87900,
+      "realtime": false,
+      "headsign": "Herttoniemi(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Herttoniemi (M)",
+       "route": {
+        "shortName": "510",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 89700,
+      "realtimeDeparture": 89700,
+      "realtime": false,
+      "headsign": "Herttoniemi(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Herttoniemi (M)",
+       "route": {
+        "shortName": "510",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794261600,
+      "scheduledDeparture": 18840,
+      "realtimeDeparture": 18840,
+      "realtime": false,
+      "headsign": "Herttoniemi(M) via Kalasatama(M)",
+      "trip": {
+       "tripHeadsign": "Herttoniemi(M)",
+       "route": {
+        "shortName": "59",
+        "mode": "BUS"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "gtfsId": "HSL:1174147",
+    "stoptimesWithoutPatterns": [
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 83460,
+      "realtimeDeparture": 83566,
+      "realtime": true,
+      "headsign": "Kivenlahti via Aalto-yliop. (M)",
+      "trip": {
+       "tripHeadsign": "Kivenlahti (M)",
+       "route": {
+        "shortName": "510",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84000,
+      "realtimeDeparture": 84010,
+      "realtime": true,
+      "headsign": "Munkkivuori via Meilahti",
+      "trip": {
+       "tripHeadsign": "Munkkivuori",
+       "route": {
+        "shortName": "500",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84420,
+      "realtimeDeparture": 84420,
+      "realtime": false,
+      "headsign": "Malminkartano via Pitäjänmäki as.",
+      "trip": {
+       "tripHeadsign": "Malminkartano",
+       "route": {
+        "shortName": "59",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84540,
+      "realtimeDeparture": 84540,
+      "realtime": false,
+      "headsign": "Pirkkola via Ilmala",
+      "trip": {
+       "tripHeadsign": "Pirkkola",
+       "route": {
+        "shortName": "23",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 84600,
+      "realtimeDeparture": 84600,
+      "realtime": false,
+      "headsign": "Kivenlahti via Aalto-yliop. (M)",
+      "trip": {
+       "tripHeadsign": "Kivenlahti (M)",
+       "route": {
+        "shortName": "510",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85200,
+      "realtimeDeparture": 85200,
+      "realtime": false,
+      "headsign": "Munkkivuori via Meilahti",
+      "trip": {
+       "tripHeadsign": "Munkkivuori",
+       "route": {
+        "shortName": "500",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85680,
+      "realtimeDeparture": 85680,
+      "realtime": false,
+      "headsign": "Malminkartano via Pitäjänmäki as.",
+      "trip": {
+       "tripHeadsign": "Malminkartano",
+       "route": {
+        "shortName": "59",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85800,
+      "realtimeDeparture": 85800,
+      "realtime": false,
+      "headsign": "Kivenlahti via Aalto-yliop. (M)",
+      "trip": {
+       "tripHeadsign": "Kivenlahti (M)",
+       "route": {
+        "shortName": "510",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 86340,
+      "realtimeDeparture": 86340,
+      "realtime": false,
+      "headsign": "Pirkkola via Ilmala",
+      "trip": {
+       "tripHeadsign": "Pirkkola",
+       "route": {
+        "shortName": "23",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 86400,
+      "realtimeDeparture": 86400,
+      "realtime": false,
+      "headsign": "Munkkivuori via Meilahti",
+      "trip": {
+       "tripHeadsign": "Munkkivuori",
+       "route": {
+        "shortName": "500",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 87000,
+      "realtimeDeparture": 87000,
+      "realtime": false,
+      "headsign": "Kivenlahti via Aalto-yliop. (M)",
+      "trip": {
+       "tripHeadsign": "Kivenlahti (M)",
+       "route": {
+        "shortName": "510",
+        "mode": "BUS"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 87600,
+      "realtimeDeparture": 87600,
+      "realtime": false,
+      "headsign": "Munkkivuori via Meilahti",
+      "trip": {
+       "tripHeadsign": "Munkkivuori",
+       "route": {
+        "shortName": "500",
+        "mode": "BUS"
+       }
+      }
+     }
+    ]
+   },
+   {
+    "gtfsId": "HSL:1174501",
+    "stoptimesWithoutPatterns": [
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 83400,
+      "realtimeDeparture": 83400,
+      "realtime": true,
+      "headsign": "Tikkurila-Lentoasema via Malmi",
+      "trip": {
+       "tripHeadsign": "Helsinki",
+       "route": {
+        "shortName": "I",
+        "mode": "RAIL"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 85200,
+      "realtimeDeparture": 85200,
+      "realtime": false,
+      "headsign": "Tikkurila-Lentoasema via Malmi",
+      "trip": {
+       "tripHeadsign": "Helsinki",
+       "route": {
+        "shortName": "I",
+        "mode": "RAIL"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 86100,
+      "realtimeDeparture": 86100,
+      "realtime": false,
+      "headsign": "Kerava via Malmi-Tikkurila",
+      "trip": {
+       "tripHeadsign": "Kerava",
+       "route": {
+        "shortName": "K",
+        "mode": "RAIL"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 87900,
+      "realtimeDeparture": 87900,
+      "realtime": false,
+      "headsign": "Kerava via Malmi-Tikkurila",
+      "trip": {
+       "tripHeadsign": "Kerava",
+       "route": {
+        "shortName": "K",
+        "mode": "RAIL"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 89700,
+      "realtimeDeparture": 89700,
+      "realtime": false,
+      "headsign": "Kerava via Malmi-Tikkurila",
+      "trip": {
+       "tripHeadsign": "Kerava",
+       "route": {
+        "shortName": "K",
+        "mode": "RAIL"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794175200,
+      "scheduledDeparture": 93300,
+      "realtimeDeparture": 93300,
+      "realtime": false,
+      "headsign": "Järvenpää via Kerava",
+      "trip": {
+       "tripHeadsign": "Järvenpää",
+       "route": {
+        "shortName": "T",
+        "mode": "RAIL"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794261600,
+      "scheduledDeparture": 16800,
+      "realtimeDeparture": 16800,
+      "realtime": false,
+      "headsign": "Tikkurila-Lentoasema via Malmi",
+      "trip": {
+       "tripHeadsign": "Helsinki",
+       "route": {
+        "shortName": "I",
+        "mode": "RAIL"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794261600,
+      "scheduledDeparture": 17100,
+      "realtimeDeparture": 17100,
+      "realtime": false,
+      "headsign": "Kerava via Malmi-Tikkurila",
+      "trip": {
+       "tripHeadsign": "Kerava",
+       "route": {
+        "shortName": "K",
+        "mode": "RAIL"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794261600,
+      "scheduledDeparture": 17700,
+      "realtimeDeparture": 17700,
+      "realtime": false,
+      "headsign": "Tikkurila-Lentoasema via Malmi",
+      "trip": {
+       "tripHeadsign": "Helsinki",
+       "route": {
+        "shortName": "I",
+        "mode": "RAIL"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794261600,
+      "scheduledDeparture": 18300,
+      "realtimeDeparture": 18300,
+      "realtime": false,
+      "headsign": "Kerava via Malmi-Tikkurila",
+      "trip": {
+       "tripHeadsign": "Kerava",
+       "route": {
+        "shortName": "K",
+        "mode": "RAIL"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794261600,
+      "scheduledDeparture": 18600,
+      "realtimeDeparture": 18600,
+      "realtime": false,
+      "headsign": "Tikkurila-Lentoasema via Malmi",
+      "trip": {
+       "tripHeadsign": "Helsinki",
+       "route": {
+        "shortName": "I",
+        "mode": "RAIL"
+       }
+      }
+     },
+     {
+      "serviceDay": 1794261600,
+      "scheduledDeparture": 19200,
+      "realtimeDeparture": 19200,
+      "realtime": false,
+      "headsign": "Tikkurila-Lentoasema via Malmi",
+      "trip": {
+       "tripHeadsign": "Helsinki",
+       "route": {
+        "shortName": "I",
+        "mode": "RAIL"
+       }
+      }
+     }
+    ]
+   }
+  ]
+ }
+}

@@ -1,0 +1,6 @@
+CLAUDE.local.md
+.claude/settings.local.json
+
+# Tracked on purpose, even where a global gitignore ignores mise.toml: the
+# README's setup steps are mise tasks defined in these files.
+!mise.toml

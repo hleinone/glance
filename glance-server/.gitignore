@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+cache/
+config.local.toml
+/glance.png
+mise.local.toml

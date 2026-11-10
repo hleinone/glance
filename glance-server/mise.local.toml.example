@@ -1,0 +1,6 @@
+# Copy to mise.local.toml (git-ignored) for settings specific to your setup.
+# mise layers it over mise.toml.
+
+[env]
+# Where `mise run deploy` deploys: the Raspberry Pi, as user@host.
+GLANCE_PI = "pi@raspberrypi.local"

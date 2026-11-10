@@ -1,0 +1,948 @@
+import json
+import os
+import tempfile
+import unittest
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from glance import battery, config, departures, fmi, hsl, i18n, icons, render, schedule
+
+DATA = Path(__file__).parent / "data"
+HELSINKI = ZoneInfo("Europe/Helsinki")
+
+
+def isolated_config(test: unittest.TestCase, **changes) -> config.Config:
+    """config.toml alone (no config.local.toml, no environment), no key, and a
+    cache folder of the test's own: tests must not depend on this machine's
+    settings, reach the network or touch the real cache."""
+    cache = Path(test.enterContext(tempfile.TemporaryDirectory()))
+    return replace(config.load(local_overrides=False), **{"digitransit_key": None, "cache_dir": cache, **changes})
+
+
+class FMITest(unittest.TestCase):
+    def test_parse_live_sample(self):
+        # tests/data/fmi_simple.xml is a real response saved on 2026-11-09.
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        self.assertEqual(len(hours), 72)
+        first = hours[0]
+        self.assertEqual(first.time, datetime(2026, 11, 9, 21, tzinfo=UTC))
+        self.assertEqual(first.temperature, 4.43)
+        self.assertEqual(first.wind_speed, 3.5)
+        self.assertEqual(first.wind_direction, 247.0)
+        self.assertEqual(first.pop, 0.0)
+        self.assertEqual(first.symbol, 3)
+        self.assertEqual(hours, sorted(hours, key=lambda h: h.time))
+
+    def test_nan_becomes_none(self):
+        xml = b"""<wfs:FeatureCollection xmlns:wfs="http://www.opengis.net/wfs/2.0"
+            xmlns:BsWfs="http://xml.fmi.fi/schema/wfs/2.0"><wfs:member><BsWfs:BsWfsElement>
+            <BsWfs:Time>2026-11-09T21:00:00Z</BsWfs:Time>
+            <BsWfs:ParameterName>Temperature</BsWfs:ParameterName>
+            <BsWfs:ParameterValue>NaN</BsWfs:ParameterValue>
+            </BsWfs:BsWfsElement></wfs:member></wfs:FeatureCollection>"""
+        (hour,) = fmi.parse(xml)
+        self.assertIsNone(hour.temperature)
+        self.assertIsNone(hour.symbol)
+
+    def test_infinite_values_are_dropped(self):
+        # Only NaN used to be: infinity then broke every drawing, also from the cache.
+        self.assertEqual([fmi._value(v) for v in ("inf", "-Infinity", "1e999", "NaN", "3.5", None, "x")],
+                         [None, None, None, None, 3.5, None, None])
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "forecast.json"
+            path.write_text(json.dumps({
+                "fetched_at": "2026-11-11T10:00:00+00:00", "parameters": list(fmi.PARAMETERS),
+                "hours": [{"time": "2026-11-11T10:00:00+00:00", "temperature": float("inf"), "wind_speed": float("nan"),
+                           "wind_direction": 180.0, "pop": 10.0, "symbol": 3, "feels_like": -2.0}],
+            }))
+            hour = fmi.load_cache(path).hours[0]
+        self.assertEqual((hour.temperature, hour.wind_speed, hour.wind_direction, hour.symbol), (None, None, 180.0, 3))
+
+    def test_feels_like(self):
+        xml = b"""<wfs:FeatureCollection xmlns:wfs="http://www.opengis.net/wfs/2.0"
+            xmlns:BsWfs="http://xml.fmi.fi/schema/wfs/2.0"><wfs:member><BsWfs:BsWfsElement>
+            <BsWfs:Time>2026-11-10T16:00:00Z</BsWfs:Time>
+            <BsWfs:ParameterName>FeelsLike</BsWfs:ParameterName>
+            <BsWfs:ParameterValue>2.41793</BsWfs:ParameterValue>
+            </BsWfs:BsWfsElement></wfs:member></wfs:FeatureCollection>"""
+        (hour,) = fmi.parse(xml)
+        self.assertEqual(hour.feels_like, 2.41793)
+        self.assertIn("FeelsLike", fmi.PARAMETERS)
+
+    def test_cache_from_before_feels_like_loads(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "forecast.json"
+            path.write_text(json.dumps({"fetched_at": "2026-11-09T20:00:00+00:00", "hours": [
+                {"time": "2026-11-09T21:00:00+00:00", "temperature": 4.4, "wind_speed": 3.5,
+                 "wind_direction": 247.0, "pop": 0.0, "symbol": 3}]}))
+            fc = fmi.load_cache(path)
+        self.assertIsNotNone(fc)
+        self.assertIsNone(fc.hours[0].feels_like)
+        self.assertNotEqual(fc.parameters, fmi.PARAMETERS)  # so the server refetches at once
+
+    def test_exception_report(self):
+        xml = b"""<ExceptionReport xmlns="http://www.opengis.net/ows/1.1"><Exception>
+            <ExceptionText>Unknown parameter 'Bogus'</ExceptionText></Exception></ExceptionReport>"""
+        with self.assertRaisesRegex(fmi.FMIError, "Bogus"):
+            fmi.parse(xml)
+
+    def test_any_bad_response_is_an_fmi_error(self):
+        # An error page from a proxy, an empty or cut-off body: all one kind of
+        # failure for the caller (another kind once killed the refresher thread).
+        import http.client, io, urllib.error
+        from unittest import mock
+        for body in (b"<html><body>502 Bad Gateway<br></body></html>", b"", b"<wfs:FeatureCollection"):
+            with self.assertRaises(fmi.FMIError):
+                fmi.parse(body)
+        for failure in (
+            urllib.error.HTTPError("http://x", 502, "Bad Gateway", {}, io.BytesIO(b"<html>oops")),
+            urllib.error.HTTPError("http://x", 429, "Too Many", {}, io.BytesIO(b"")),
+            http.client.IncompleteRead(b"<wfs"),
+            TimeoutError("timed out"),
+        ):
+            with mock.patch("urllib.request.urlopen", side_effect=failure):
+                with self.assertRaises(fmi.FMIError):
+                    fmi.fetch(60.2, 24.9, HELSINKI)
+
+    def test_cache_round_trip(self):
+        fc = fmi.Forecast(datetime(2026, 11, 9, 20, tzinfo=UTC), fmi.parse((DATA / "fmi_simple.xml").read_bytes()))
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "sub" / "forecast.json"
+            fmi.save_cache(fc, path)
+            self.assertEqual(fmi.load_cache(path), fc)
+            path.write_text("{not json")
+            self.assertIsNone(fmi.load_cache(path))
+            self.assertIsNone(fmi.load_cache(Path(d) / "missing.json"))
+
+    def test_fmi_icons_cover_every_code(self):
+        for code in fmi.SYMBOLS:
+            for size in (76, 36):
+                icon = icons.fmi_symbol(code, size)
+                self.assertIsNotNone(icon, (code, size))
+                self.assertEqual((icon.mode, icon.size), ("L", (size, size)))
+        self.assertIsNone(icons.fmi_symbol(None, 76))
+        self.assertIsNone(icons.fmi_symbol(999, 76))
+        # Without a pre-rendered PNG, the hand-drawn icon is used.
+        self.assertEqual(render.weather_icon(999, "rain", 2, 50).size, (50, 50))
+        self.assertTrue((icons.FMI_DIR / "LICENSE").exists())
+
+    def test_symbols(self):
+        self.assertEqual(fmi.symbol_info(31, "fi"), ("rain", 1, "Heikkoa vesisadetta"))
+        self.assertEqual(fmi.symbol_info(2, "en"), ("partly_cloudy", 1, "Partly cloudy"))
+        self.assertEqual(fmi.symbol_info(999, "en")[0], "unknown")
+
+    def test_forecast_helpers(self):
+        fc = fmi.Forecast(datetime(2026, 11, 9, 20, tzinfo=UTC), fmi.parse((DATA / "fmi_simple.xml").read_bytes()))
+        now = datetime(2026, 11, 9, 21, 40, tzinfo=UTC)
+        self.assertEqual(fc.current(now).time, datetime(2026, 11, 9, 22, tzinfo=UTC))
+        upcoming = fc.upcoming(now, 12)
+        self.assertEqual(len(upcoming), 12)
+        self.assertEqual(upcoming[0].time, datetime(2026, 11, 9, 22, tzinfo=UTC))
+
+
+class FormatTest(unittest.TestCase):
+    def test_temperature_uses_real_minus(self):
+        self.assertEqual(render.fmt_temp(-3.2), "−3°")
+        self.assertEqual(render.fmt_temp(-0.4), "0°")
+        self.assertEqual(render.fmt_temp(4.5), "5°")
+        self.assertEqual(render.fmt_temp(None), "–")
+
+    def test_fit_text_shrinks_then_truncates(self):
+        f, text = render.fit_text("Short", "medium", 16, 12, 200)
+        self.assertEqual((f.size, text), (16, "Short"))
+        f, text = render.fit_text("Westendinasema via Otaniemi ja Keilaniemi", "medium", 16, 12, 120)
+        self.assertEqual(f.size, 12)
+        self.assertTrue(text.endswith("…"))
+        self.assertLessEqual(f.getlength(text), 120)
+
+    def test_i18n(self):
+        t = datetime(2026, 11, 9, 7, 5, tzinfo=HELSINKI)
+        self.assertEqual(i18n.date("en", t), "Monday 9 November")
+        self.assertEqual(i18n.date("fi", t), "Maanantai 9.11.")
+        self.assertEqual(i18n.clock("en", t), "07:05")
+        self.assertEqual(i18n.clock("fi", t), "07.05")
+        self.assertEqual(i18n.age(130), "2 h 10 min")
+
+
+def _stoptime(service_day, seconds, route, headsign, mode="BUS", realtime=True, delay=0):
+    return {
+        "serviceDay": service_day,
+        "scheduledDeparture": seconds,
+        "realtimeDeparture": seconds + delay,
+        "realtime": realtime,
+        "headsign": headsign,
+        "trip": {"tripHeadsign": headsign + " (trip)", "route": {"shortName": route, "mode": mode}},
+    }
+
+
+class HSLTest(unittest.TestCase):
+    # serviceDay is local midnight as a Unix timestamp; times are seconds after it.
+    DAY = int(datetime(2026, 11, 9, tzinfo=HELSINKI).timestamp())
+    DATA = {
+        "stops": [
+            {"gtfsId": "HSL:1", "stoptimesWithoutPatterns": [
+                _stoptime(DAY, 23 * 3600 + 35 * 60, "7", "Senaatintori", "TRAM", delay=60),
+                _stoptime(DAY, 23 * 3600 + 50 * 60, "59", "Itäkeskus (M)", realtime=False),
+            ]},
+            {"gtfsId": "HSL:2", "stoptimesWithoutPatterns": [
+                _stoptime(DAY, 23 * 3600 + 40 * 60, "7", "Pasila", "TRAM"),
+                {**_stoptime(DAY, 24 * 3600 + 5 * 60, "9", "Kirurgi", "TRAM"), "headsign": None},
+            ]},
+            None,
+        ]
+    }
+
+    def test_parse(self):
+        by_stop = hsl.parse_departures(self.DATA)
+        self.assertEqual(set(by_stop), {"HSL:1", "HSL:2"})
+        tram, bus = by_stop["HSL:1"]
+        self.assertEqual((tram.route, tram.headsign, tram.mode, tram.realtime), ("7", "Senaatintori", "tram", True))
+        # Realtime departure = serviceDay + realtimeDeparture (scheduled + 60 s delay).
+        self.assertEqual(tram.time, datetime(2026, 11, 9, 23, 36, tzinfo=HELSINKI))
+        self.assertEqual((bus.mode, bus.realtime), ("bus", False))
+        # Past midnight on the same service day, and the trip headsign as fallback.
+        after_midnight = by_stop["HSL:2"][1]
+        self.assertEqual(after_midnight.time, datetime(2026, 11, 10, 0, 5, tzinfo=HELSINKI))
+        self.assertEqual(after_midnight.headsign, "Kirurgi (trip)")
+
+    def test_parse_live_sample(self):
+        # tests/data/hsl_departures.json is a real response saved on 2026-11-09 for
+        # Pasilan asema: tram platforms 32 + 34, bus 31 + 36, train platform 2.
+        payload = json.loads((DATA / "hsl_departures.json").read_text())
+        by_stop = hsl.parse_departures(payload["data"])
+        self.assertEqual(len(by_stop), 5)
+        self.assertTrue(all(len(deps) == 12 for deps in by_stop.values()))
+        trams = hsl.select(by_stop, hsl.StopQuery(("HSL:1174411", "HSL:1174410")))
+        self.assertEqual({d.mode for d in trams}, {"tram"})
+        self.assertEqual(trams, sorted(trams, key=lambda d: d.time))
+        self.assertTrue(any(d.realtime for d in trams) and not all(d.realtime for d in trams))
+        self.assertEqual({d.mode for d in by_stop["HSL:1174501"]}, {"rail"})
+        only_7 = hsl.select(by_stop, hsl.StopQuery(("HSL:1174411", "HSL:1174410"), frozenset({"7"})))
+        self.assertTrue(only_7 and all(d.route == "7" for d in only_7))
+
+    def test_any_bad_response_is_an_hsl_error(self):
+        import http.client, io
+        from unittest import mock
+        query = [hsl.StopQuery(("HSL:1",))]
+
+        def answer(payload):
+            return mock.patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(payload).encode()))
+
+        for payload in (
+            [],                                                     # not an object
+            {"data": {"stops": [{"name": "no id"}]}},
+            {"data": {"stops": [{"gtfsId": "HSL:1", "stoptimesWithoutPatterns": [
+                {"serviceDay": "today", "realtimeDeparture": 60}]}]}},
+            {"errors": [{"message": None}]},
+            {"errors": ["text"]},
+        ):
+            with answer(payload), self.assertRaises(hsl.HSLError, msg=payload):
+                hsl.fetch(query, "key", "fi")
+        with mock.patch("urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"{")):
+            with self.assertRaises(hsl.HSLError):
+                hsl.fetch(query, "key", "fi")
+
+    def test_mode_icon_names_are_limited(self):
+        self.assertIsNone(icons.mode_icon("../fmi/36/1"))
+        self.assertIsNone(icons.mode_icon("airplane"))
+
+    def test_short_headsign(self):
+        self.assertEqual(hsl.short_headsign("Herttoniemi(M) via Kalasatama(M)"), "Herttoniemi(M)")
+        self.assertEqual(hsl.short_headsign("Länsisatama VIA Kallio"), "Länsisatama")
+        self.assertEqual(hsl.short_headsign("Viikki"), "Viikki")  # "vi..." is not "via"
+        self.assertEqual(hsl.short_headsign("Viaporintie"), "Viaporintie")
+        payload = json.loads((DATA / "hsl_departures.json").read_text())
+        deps = [d for ds in hsl.parse_departures(payload["data"]).values() for d in ds]
+        self.assertFalse(any(" via " in d.headsign.lower() for d in deps))
+
+    def test_stop_names(self):
+        data = {"stops": [{"gtfsId": "HSL:1", "name": "Pasilan asema", "stoptimesWithoutPatterns": []},
+                          {"gtfsId": "HSL:2", "stoptimesWithoutPatterns": []}, None]}
+        self.assertEqual(hsl.parse_stop_names(data), {"HSL:1": "Pasilan asema"})
+
+    def test_trunk_routes(self):
+        day = int(datetime(2026, 11, 10, tzinfo=HELSINKI).timestamp())
+        def st(route, rtype):
+            return {**_stoptime(day, 8 * 3600, route, "Kamppi"), "trip": {"route": {"shortName": route, "mode": "BUS", "type": rtype}}}
+        data = {"stops": [{"gtfsId": "HSL:1", "stoptimesWithoutPatterns": [st("400", 702), st("25", 701), st("280", 700), st("x", None)]}]}
+        self.assertEqual([d.trunk for d in hsl.parse_departures(data)["HSL:1"]], [True, False, False, False])
+        # The saved live response predates fetching the type: nothing is trunk, nothing breaks.
+        payload = json.loads((DATA / "hsl_departures.json").read_text())
+        self.assertFalse(any(d.trunk for ds in hsl.parse_departures(payload["data"]).values() for d in ds))
+
+    def test_stop_modes(self):
+        data = {"stops": [{"gtfsId": "HSL:1", "vehicleMode": "TRAM"}, {"gtfsId": "HSL:2", "vehicleMode": None},
+                          {"gtfsId": "HSL:3", "vehicleMode": "BUS"}, None]}
+        self.assertEqual(hsl.parse_stop_modes(data), {"HSL:1": "tram", "HSL:3": "bus"})
+        self.assertEqual(departures.ordered_modes(["bus", "tram", "bus", "hovercraft"]), ("tram", "bus", "hovercraft"))
+
+    def test_mode_icons(self):
+        for mode in ("tram", "bus", "subway", "rail", "ferry"):
+            icon = icons.mode_icon(mode)
+            self.assertIsNotNone(icon, mode)
+            self.assertEqual(icon.size, (icons.MODE_ICON_SIZE, icons.MODE_ICON_SIZE))
+        self.assertIsNone(icons.mode_icon("hovercraft"))
+        for name in ("COPYING", "LICENSE-EUPL.txt", "README"):
+            self.assertTrue((icons.HSL_DIR / name).exists(), name)
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
+        self.assertEqual(departures.placeholder("X", 1, now).modes, ("bus",))
+
+    def test_select_merges_and_filters(self):
+        by_stop = hsl.parse_departures(self.DATA)
+        merged = hsl.select(by_stop, hsl.StopQuery(("HSL:1", "HSL:2")))
+        self.assertEqual([d.route for d in merged], ["7", "7", "59", "9"])
+        trams = hsl.select(by_stop, hsl.StopQuery(("HSL:1", "HSL:2", "HSL:404"), frozenset({"7", "9"})))
+        self.assertEqual([d.headsign for d in trams], ["Senaatintori", "Pasila", "Kirurgi (trip)"])
+
+    def test_minutes_and_upcoming(self):
+        now = datetime(2026, 11, 9, 23, 30, 50, tzinfo=HELSINKI)
+        deps = hsl.select(hsl.parse_departures(self.DATA), hsl.StopQuery(("HSL:1", "HSL:2")))
+        self.assertEqual([d.minutes(now) for d in deps], [5, 9, 19, 34])
+        stop = departures.StopDepartures("X", deps)
+        self.assertEqual(len(stop.upcoming(now + timedelta(minutes=5, seconds=20), 8)), 4)  # 10 s past: kept
+        self.assertEqual(len(stop.upcoming(now + timedelta(minutes=6), 8)), 3)
+
+    def test_stop_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            path.write_text('''
+[location]
+lat = 60.2
+lon = 24.9
+[[stops]]
+name = "One"
+id = "HSL:1"
+routes = [7, "9"]
+[[stops]]
+name = "Two"
+ids = ["HSL:2", "HSL:3"]
+[[stops]]
+name = "Three"
+codes = ["H0665", "H0664"]
+[[stops]]
+codes = "H0664"
+''')
+            (Path(d) / "config.local.toml").write_text('[digitransit]\nkey = "secret"\n')
+            from unittest import mock
+            with mock.patch.dict("os.environ"):
+                os.environ.pop("GLANCE_DIGITRANSIT_KEY", None)  # it would win over the file
+                cfg = config.load(path)
+                os.environ["GLANCE_DIGITRANSIT_KEY"] = "from-env"
+                self.assertEqual(config.load(path).digitransit_key, "from-env")
+                self.assertEqual(config.load(path, local_overrides=False).digitransit_key, None)
+        self.assertEqual(cfg.digitransit_key, "secret")
+        self.assertEqual(cfg.stops[0], config.Stop("One", ("HSL:1",), frozenset({"7", "9"})))
+        self.assertEqual(cfg.stops[1].ids, ("HSL:2", "HSL:3"))
+        self.assertEqual(cfg.stops[2].ids, ("H0665", "H0664"))
+        self.assertEqual(cfg.stops[3], config.Stop("", ("H0664",)))
+
+    def test_stop_code_from_geocoding(self):
+        # Shape of a real geocoding response for a stop code: the HSL feed's stop
+        # comes first, then the national (MATKA) feed's copies of it.
+        def feature(source, ref, code):
+            return {"properties": {"source": source, "id": f"GTFS:{ref}#{code}",
+                                   "addendum": {"GTFS": {"code": code, "modes": ["BUS"]}}}}
+        data = {"features": [
+            feature("gtfsmatka", "MATKA:123456", "H0665"),
+            feature("gtfshsl", "HSL:1174410", "H0664"),
+            feature("gtfshsl", "HSL:1174411", "H0665"),
+        ]}
+        self.assertEqual(hsl.stop_id_from_geocoding(data, "h0665"), "HSL:1174411")
+        self.assertIsNone(hsl.stop_id_from_geocoding(data, "H9999"))
+        self.assertIsNone(hsl.stop_id_from_geocoding({}, "H0665"))
+        self.assertTrue(hsl.is_gtfs_id("HSL:1174411"))
+        self.assertFalse(hsl.is_gtfs_id("H0665"))
+
+
+class RenderTest(unittest.TestCase):
+    def setUp(self):
+        self.cfg = isolated_config(self)
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        self.now = datetime(2026, 11, 9, 23, 30, tzinfo=HELSINKI)
+        self.scene = render.Scene(
+            now=self.now,
+            language="en",
+            forecast=fmi.Forecast(self.now - timedelta(minutes=5), hours),
+            weather_stale_after=timedelta(minutes=45),
+            stops=[departures.placeholder(n, i, self.now) for i, n in enumerate("ABC")],
+        )
+
+    def assert_panel_image(self, img):
+        self.assertEqual(img.size, (800, 480))
+        self.assertEqual(img.mode, "L")
+        self.assertLessEqual({c for _, c in img.getcolors()}, {0, 85, 170, 255})
+
+    def test_render(self):
+        for lang in ("en", "fi"):
+            self.assert_panel_image(render.render(self.cfg, replace(self.scene, language=lang)))
+
+    def test_render_without_data(self):
+        sc = replace(self.scene, forecast=None, stops=[departures.StopDepartures("Empty", [])])
+        self.assert_panel_image(render.render(self.cfg, sc))
+
+    def test_status_text(self):
+        self.assertEqual(render._status_warning(self.scene), None)
+        live = replace(self.scene, departures_live=True, departures_fetched_at=self.now - timedelta(minutes=12))
+        self.assertTrue(live.departures_stale)
+        self.assertEqual(render._status_warning(live), "Departures 12 min old")
+        fresh = replace(live, departures_fetched_at=self.now - timedelta(seconds=40))
+        self.assertFalse(fresh.departures_stale)
+        self.assertEqual(render._status_warning(fresh), None)
+        self.assert_panel_image(render.render(self.cfg, live))
+
+    def test_g2(self):
+        from PIL import Image
+        img = render.render(self.cfg, self.scene)
+        g2 = render.to_g2(img)
+        self.assertEqual(len(g2), 800 * 480 // 4)
+        # Unpacks to the same image: 0..3 per pixel, first pixel in the top bits.
+        levels = [(byte >> shift) & 3 for byte in g2 for shift in (6, 4, 2, 0)]
+        self.assertEqual(bytes(85 * v for v in levels), img.tobytes())
+        tiny = Image.frombytes("L", (8, 1), bytes([0, 85, 170, 255, 255, 170, 85, 0]))
+        self.assertEqual(render.to_g2(tiny), bytes([0x1B, 0xE4]))
+
+    def test_departure_clock_times(self):
+        stop = departures.placeholder("A", 0, self.now)
+        dep = stop.departures[1]  # 3 minutes from now
+        minutes = render._minutes_text(dep, self.scene)
+        clock = render._minutes_text(dep, replace(self.scene, departure_clock=True))
+        self.assertEqual(minutes, ("3", "min"))
+        self.assertEqual(clock, (i18n.clock("en", dep.time.astimezone(HELSINKI)), ""))
+        self.assert_panel_image(render.render(self.cfg, replace(self.scene, departure_clock=True)))
+
+    def test_png(self):
+        png = render.to_png(render.render(self.cfg, self.scene))
+        self.assertTrue(png.startswith(b"\x89PNG"))
+
+
+EVERY_1 = schedule.WakeSchedule((), 1)
+EVERY_5 = schedule.WakeSchedule((), 5)
+# The example schedule in config.toml: weekday mornings every minute, nights
+# every 15 minutes, otherwise every 5.
+WEEK = schedule.WakeSchedule((
+    schedule.WakeRule(frozenset(range(5)), 7 * 60, 9 * 60, 1),
+    schedule.WakeRule(frozenset(range(7)), 23 * 60, 6 * 60, 15),
+), 5)
+
+
+class ScheduleTest(unittest.TestCase):
+    def t(self, h, m, s=0, day=10):  # 2026-11-10 is a Tuesday, the 14th a Saturday
+        return datetime(2026, 11, day, h, m, s, tzinfo=HELSINKI)
+
+    def test_rules(self):
+        self.assertEqual(WEEK.interval_at(self.t(7, 0)), 1)
+        self.assertEqual(WEEK.interval_at(self.t(12, 0)), 5)  # default
+        self.assertEqual(WEEK.interval_at(self.t(7, 0, day=14)), 5)  # Saturday morning
+        self.assertEqual(WEEK.interval_at(self.t(23, 30)), 15)
+        self.assertEqual(WEEK.interval_at(self.t(3, 0)), 15)  # past midnight
+        self.assertEqual(WEEK.interval_at(self.t(9, 0)), 5)  # "to" exclusive ("from" inclusive: 07:00 above)
+
+    def test_next_wake_lands_on_period_starts(self):
+        # A period starting off the previous interval's grid is hit exactly.
+        odd = schedule.WakeSchedule((schedule.WakeRule(frozenset(range(7)), 6 * 60 + 40, 7 * 60, 1),), 15)
+        self.assertEqual(odd.next_wake(self.t(6, 31, 30)), self.t(6, 40))  # not 06:45
+        self.assertEqual(WEEK.next_wake(self.t(9, 1, 30)), self.t(9, 5))
+        self.assertEqual(WEEK.next_wake(self.t(22, 58)), self.t(23, 0))
+        self.assertEqual(WEEK.next_wake(self.t(23, 0, 30)), self.t(23, 15))
+
+    def test_wakes_per_day(self):
+        def count(day):
+            start = self.t(0, 0, day=day)
+            return sum(WEEK.is_wake(start + timedelta(minutes=m)) for m in range(1440))
+        self.assertEqual(count(10), 328)  # Tuesday
+        self.assertEqual(count(14), 232)  # Saturday
+
+    def test_plan_interval_for_display(self):
+        self.assertEqual(schedule.plan(self.t(7, 0, 2), WEEK, 2).interval_minutes, 1)
+        self.assertEqual(schedule.plan(self.t(12, 0, 2), WEEK, 2).interval_minutes, 5)
+        # Waking a few seconds early for 09:00 draws the 09:00 image: 5-minute period.
+        p = schedule.plan(self.t(8, 59, 55), WEEK, 2)
+        self.assertEqual((p.display_time, p.interval_minutes), (self.t(9, 0), 5))
+        self.assertEqual(p.sleep_seconds, 5 * 60 + 5 + 2)  # to 09:05:02
+
+    def test_dst_change_counts_real_seconds(self):
+        # 2027-03-28: Finland's clocks jump 03:00 -> 04:00. From 02:50 with 15-minute
+        # nights, the next wake is 03:00 wall-clock = 04:00 EEST, 10 real minutes away.
+        sched = schedule.WakeSchedule((), 15)
+        now = datetime(2027, 3, 28, 2, 50, tzinfo=HELSINKI)
+        p = schedule.plan(now, sched, 0)
+        self.assertLessEqual(p.sleep_seconds, 15 * 60)
+
+    def test_autumn_clock_change(self):
+        # 2027-10-31: 04:00 EEST becomes 03:00 EET, so 03:00-03:59 happens twice.
+        # Adding to a time on the wall clock forgets which pass it is in: the
+        # next wake came out an hour in the past and the device was told 1 s.
+        sched = schedule.WakeSchedule((), 15)
+        first = datetime(2027, 10, 31, 3, 45, 2, tzinfo=HELSINKI)           # EEST
+        second = datetime(2027, 10, 31, 3, 20, 0, tzinfo=HELSINKI, fold=1)  # EET, an hour and a bit later
+        self.assertEqual(schedule.plan(first, sched, 2).sleep_seconds, 900)   # to 03:00 EET, not 04:00
+        p = schedule.plan(second, sched, 2)
+        self.assertEqual(p.sleep_seconds, 602)
+        self.assertEqual(p.display_time, second)
+        wake = sched.next_wake(first)
+        self.assertEqual((wake.hour, wake.minute, wake.fold), (3, 0, 1))
+        self.assertEqual(schedule.seconds_between(first, schedule.next_poll(first, 15)), 43)
+        every_wake, t = [], datetime(2027, 10, 31, 2, 59, tzinfo=HELSINKI)
+        while len(every_wake) < 9:
+            t = sched.next_wake(t)
+            every_wake.append(t.strftime("%H:%M %Z"))
+        self.assertEqual(every_wake, ["03:00 EEST", "03:15 EEST", "03:30 EEST", "03:45 EEST",
+                                      "03:00 EET", "03:15 EET", "03:30 EET", "03:45 EET", "04:00 EET"])
+
+    def test_next_boundary(self):
+        self.assertEqual(schedule.next_boundary(self.t(7, 30, 10), 1), self.t(7, 31))
+        self.assertEqual(schedule.next_boundary(self.t(7, 30), 1), self.t(7, 31))  # strictly after
+        self.assertEqual(schedule.next_boundary(self.t(7, 31, 10), 15), self.t(7, 45))
+        self.assertEqual(schedule.next_boundary(self.t(23, 59, 30), 15), self.t(0, 0, day=11))
+
+    def test_bad_intervals_fail_at_startup(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            for device in ("wake_interval_minutes = 0", "wake_interval_minutes = 5\n[[device.schedule]]\n"
+                           'from = "07:00"\nto = "09:00"\nevery = 0'):
+                path.write_text(f"[location]\nlat = 60.2\nlon = 24.9\n[device]\n{device}\n")
+                with self.assertRaisesRegex(ValueError, "1..1440"):
+                    config.load(path)
+            for bad, message in (
+                ("[digitransit]\npoll_lead_seconds = 60", "poll_lead_seconds"),  # the refresher would never wait
+                ("[device]\nwake_offset_seconds = -30", "wake_offset_seconds"),
+                ('[[device.schedule]]\nfrom = "07:99"\nto = "09:00"\nevery = 1', "bad time"),
+                ('[[device.schedule]]\nfrom = "7"\nto = "09:00"\nevery = 1', "bad time"),
+            ):
+                path.write_text(f"[location]\nlat = 60.2\nlon = 24.9\n{bad}\n")
+                with self.assertRaisesRegex(ValueError, message):
+                    config.load(path)
+            path.write_text("[location]\nlat = 60.2\nlon = 24.9\n[[stops]]\ncodes = [1234, \"H0665\"]\n[[stops]]\ncode = 5678\n")
+            self.assertEqual([s.ids for s in config.load(path).stops], [("1234", "H0665"), ("5678",)])  # text, not numbers
+            path.write_text('[location]\nlat = 60.2\nlon = 24.9\n[server]\nhostnames = "Pi.Lan"\n')
+            self.assertEqual(config.load(path).hostnames, ("pi.lan",))  # one name, not its letters
+
+    def test_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            path.write_text('''
+[location]
+lat = 60.2
+lon = 24.9
+[device]
+wake_interval_minutes = 5
+[[device.schedule]]
+days = "weekdays"
+from = "07:00"
+to = "09:00"
+every = 1
+[[device.schedule]]
+days = ["sat", "Sunday"]
+from = "23:00"
+to = "06:00"
+every = 15
+''')
+            cfg = config.load(path)
+        self.assertEqual(cfg.wake_schedule.default_every, 5)
+        self.assertEqual(cfg.wake_schedule.rules[0], schedule.WakeRule(frozenset(range(5)), 420, 540, 1))
+        self.assertEqual(cfg.wake_schedule.rules[1].days, frozenset({5, 6}))
+        self.assertEqual(cfg.wake_schedule.rules[1].end, 360)
+
+    def test_wakes_just_after_the_minute(self):
+        p = schedule.plan(self.t(7, 30, 3), EVERY_1, 2)
+        self.assertEqual((p.display_time, p.sleep_seconds), (self.t(7, 30, 3), 59))  # 07:31:02
+
+    def test_early_wake_draws_the_coming_minute(self):
+        # Sleep timer drift: the device arrives at 07:29:55 for the 07:30 update.
+        p = schedule.plan(self.t(7, 29, 55), EVERY_1, 2)
+        self.assertEqual(p.display_time, self.t(7, 30))
+        self.assertEqual(p.sleep_seconds, 67)  # to 07:31:02, not 7 s
+
+    def test_longer_interval_aligns_to_clock(self):
+        p = schedule.plan(self.t(7, 32, 40), EVERY_5, 2)
+        self.assertEqual(p.sleep_seconds, 2 * 60 + 20 + 2)  # 07:35:02
+        p = schedule.plan(self.t(23, 58), EVERY_5, 2)
+        self.assertEqual(p.sleep_seconds, 2 * 60 + 2)  # 00:00:02 next day
+
+    def test_early_after_long_sleep(self):
+        # ~1 % fast sleep timer: 9 s early after a 15-minute night sleep.
+        p = schedule.plan(self.t(23, 14, 53), WEEK, 2)
+        self.assertEqual((p.display_time, p.interval_minutes), (self.t(23, 15), 15))
+        self.assertEqual(p.sleep_seconds, 15 * 60 + 7 + 2)  # to 23:30:02, not a wake 9 s later
+
+    def test_button_press_mid_minute(self):
+        p = schedule.plan(self.t(7, 30, 41), EVERY_1, 2)
+        self.assertEqual((p.display_time, p.sleep_seconds), (self.t(7, 30, 41), 21))
+
+    def test_prerendered(self):
+        cache = schedule.Prerendered()
+        self.assertIsNone(cache.get(self.t(7, 30, 2), "/glance.png"))
+        cache.put(self.t(7, 30), {"/glance.png": b"png", "/glance.g2": b"g2"})
+        self.assertEqual(cache.get(self.t(7, 30), "/glance.png"), b"png")  # early wake, snapped
+        self.assertEqual(cache.get(self.t(7, 30, 2), "/glance.g2"), b"g2")  # on-time wake
+        self.assertIsNone(cache.get(self.t(7, 30, 35), "/glance.png"))  # mid-minute: draw fresh
+        self.assertIsNone(cache.get(self.t(7, 31, 2), "/glance.png"))  # next minute
+        self.assertIsNone(cache.get(self.t(7, 30, 2), "/other"))
+
+    def test_recent_shares_one_drawing(self):
+        recent = schedule.Recent()
+        drawn = []
+
+        def draw():
+            drawn.append(1)
+            return len(drawn)
+
+        self.assertEqual(recent.get("a", "/x", draw, lambda n: b"x%d" % n), b"x1")
+        self.assertEqual(recent.get("a", "/y", draw, lambda n: b"y%d" % n), b"y1")  # other format, same drawing
+        self.assertEqual(recent.get("a", "/x", draw, lambda n: b"never"), b"x1")
+        self.assertEqual(recent.get("b", "/x", draw, lambda n: b"x%d" % n), b"x2")  # new data: drawn afresh
+        recent._made_at -= schedule.Recent.MAX_AGE  # too old to share
+        self.assertEqual(recent.get("b", "/x", draw, lambda n: b"x%d" % n), b"x3")
+
+    def test_next_poll(self):
+        self.assertEqual(schedule.next_poll(self.t(7, 30, 10), 15), self.t(7, 30, 45))
+        self.assertEqual(schedule.next_poll(self.t(7, 30, 45), 15), self.t(7, 31, 45))
+        self.assertEqual(schedule.next_poll(self.t(7, 30, 50), 15), self.t(7, 31, 45))
+
+
+class BatteryTest(unittest.TestCase):
+    def test_percent(self):
+        self.assertEqual(battery.percent(4250), 100)
+        self.assertEqual(battery.percent(4200), 100)
+        self.assertEqual(battery.percent(3840), 50)
+        self.assertEqual(battery.percent(3845), 52)  # interpolated
+        self.assertEqual(battery.percent(3270), 0)
+        self.assertEqual(battery.percent(3000), 0)
+
+    def test_reports(self):
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
+        b = battery.Battery()
+        self.assertIsNone(b.level(now))
+        for bad in (None, "", "abc", "12", "9999"):
+            b.report(bad, now)
+        self.assertIsNone(b.level(now))
+        b.report("3840", now)
+        self.assertEqual(b.level(now + timedelta(minutes=30)), 50)
+        self.assertIsNone(b.level(now + timedelta(hours=3)))  # too old to show
+
+    def test_calibration(self):
+        # A device that reads 4.14 V when full: shift readings so that is 100 %.
+        self.assertEqual(battery.percent(4140), 94)
+        self.assertEqual(battery.percent(4140, full_mv=4140), 100)
+        self.assertEqual(battery.percent(3780, full_mv=4140), 50)  # = 3840 on the curve
+        b = battery.Battery(full_mv=4140)
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
+        b.report("4140", now)
+        self.assertEqual(b.level(now), 100)
+
+    def test_log_and_restore(self):
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "sub" / "battery.csv"
+            b = battery.Battery(log_path=path)
+            b.report("4100", now)
+            b.report("bogus", now)  # not logged
+            b.report("4090", now + timedelta(minutes=1))
+            self.assertEqual(path.read_text().splitlines(), [
+                "time,mv", "2026-11-10T08:00:00+02:00,4100", "2026-11-10T08:01:00+02:00,4090"])
+            # A restarted server picks up the last reading.
+            restarted = battery.Battery(log_path=path)
+            self.assertEqual(restarted.level(now + timedelta(minutes=2)), battery.percent(4090))
+            path.write_text("time,mv\n")  # only a header: nothing to restore
+            self.assertIsNone(battery.Battery(log_path=path).level(now))
+
+    def test_log_is_rate_limited(self):
+        # Faster reports than the device ever sends are shown but not logged,
+        # so requests from elsewhere on the network can't fill the disk.
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "battery.csv"
+            b = battery.Battery(log_path=path)
+            for seconds, mv in ((0, 4100), (1, 3000), (29, 3001), (30, 4090)):
+                b.report(str(mv), now + timedelta(seconds=seconds))
+            self.assertEqual(path.read_text().splitlines(), [
+                "time,mv", "2026-11-10T08:00:00+02:00,4100", "2026-11-10T08:00:30+02:00,4090"])
+            b.report("3000", now + timedelta(seconds=31))
+            self.assertEqual(b.level(now + timedelta(seconds=31)), battery.percent(3000))  # still shown
+
+    def test_status_bar(self):
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
+        sc = render.Scene(now=now, language="fi", forecast=fmi.Forecast(now, []),
+                          weather_stale_after=timedelta(minutes=45), stops=[], battery_percent=40)
+        self.assertIsNone(render._status_warning(sc))
+        self.assertEqual(render._status_warning(replace(sc, battery_percent=15)), "Lataa akku")
+        self.assertEqual(i18n.percent("fi", 87), "87\u202f%")
+        self.assertEqual(i18n.percent("en", 87), "87%")
+
+
+class TransitTest(unittest.TestCase):
+    def test_refresh_during_fetch_waits_for_it(self):
+        import threading, time
+        from glance.__main__ import Transit
+        cfg = isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("HSL:1",))])
+        transit = Transit(cfg)
+        calls = []
+
+        def slow_fetch(now):
+            calls.append(now)
+            time.sleep(0.3)
+            with transit.lock:
+                transit.fetched_at = now
+
+        transit._fetch = slow_fetch
+        startup = threading.Thread(target=transit.refresh)
+        startup.start()
+        time.sleep(0.05)
+        transit.refresh(min_age_seconds=10)  # button press during the startup fetch
+        self.assertIsNotNone(transit.fetched_at)  # waited, so data is there
+        self.assertEqual(len(calls), 1)  # and didn't fetch twice
+        startup.join()
+
+    def test_refreshes_never_raise(self):
+        # They run in the refresher thread: an exception there used to end it
+        # for good, leaving the server up with no polling or pre-drawn images.
+        from unittest import mock
+        from glance.__main__ import Transit, Weather
+        cfg = isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("HSL:1",))])
+        with mock.patch.object(fmi, "fetch", side_effect=RuntimeError("surprise")), \
+                mock.patch.object(hsl, "fetch", side_effect=RuntimeError("surprise")), \
+                self.assertLogs("glance", "ERROR") as logs:
+            weather, transit = Weather(cfg), Transit(cfg)
+            weather.refresh(force=True)
+            transit.refresh()
+        self.assertEqual(len(logs.records), 2)
+        self.assertIsNone(weather.forecast)
+        self.assertIsNone(transit.fetched_at)
+        # A cache that can't be written doesn't lose the forecast either.
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        forecast = fmi.Forecast(datetime.now(UTC), hours)
+        with mock.patch.object(fmi, "fetch", return_value=forecast), \
+                mock.patch.object(fmi, "save_cache", side_effect=OSError("disk full")), \
+                self.assertLogs("glance", "WARNING"):
+            weather.refresh(force=True)
+        self.assertIs(weather.forecast, forecast)
+
+    def test_refresh_gives_up_waiting(self):
+        # A request the device waits on (it gives up after 10 s) uses the last
+        # good data if the fetch hasn't answered in time.
+        import threading, time
+        from glance.__main__ import Transit
+        cfg = isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("HSL:1",))])
+        transit = Transit(cfg)
+        release = threading.Event()
+        transit._fetch = lambda now: release.wait(5)
+        started = time.monotonic()
+        transit.refresh(wait_seconds=0.2)
+        self.assertLess(time.monotonic() - started, 1)
+        transit.refresh(min_age_seconds=10, wait_seconds=0.2)  # and so does one queued behind it
+        self.assertLess(time.monotonic() - started, 1)
+        release.set()
+
+    def test_no_thread_for_the_fetch(self):
+        # At the service's thread limit: draw with the last good data, don't fail the request.
+        import threading
+        from unittest import mock
+        from glance.__main__ import Transit
+        transit = Transit(isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("HSL:1",))]))
+        with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")), \
+                self.assertLogs("glance", "WARNING"):
+            transit.refresh(wait_seconds=1)
+
+    def test_failed_weather_fetch_is_retried_sooner(self):
+        from unittest import mock
+        from glance.__main__ import Weather
+        weather = Weather(isolated_config(self))
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        with mock.patch.object(fmi, "fetch", side_effect=fmi.FMIError("down")) as fetch, self.assertLogs("glance", "WARNING"):
+            weather.refresh()
+            weather.refresh()                                  # too soon
+            self.assertEqual(fetch.call_count, 1)
+            weather.last_attempt -= timedelta(minutes=3)       # not the full 15 minutes
+            weather.refresh()
+            self.assertEqual(fetch.call_count, 2)
+        with mock.patch.object(fmi, "fetch", return_value=fmi.Forecast(datetime.now(UTC), hours)) as fetch:
+            weather.last_attempt -= timedelta(minutes=3)
+            weather.refresh()
+            weather.last_attempt -= timedelta(minutes=3)       # after a success: the full interval again
+            weather.refresh()
+            self.assertEqual(fetch.call_count, 1)
+
+    def test_renumbered_stop_is_looked_up_again(self):
+        from unittest import mock
+        from glance.__main__ import Transit
+        cfg = isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("H0001",))])
+        (cfg.cache_dir / "stop_codes.json").write_text('{"H0001": "HSL:OLD", "H0002": "HSL:ELSEWHERE"}')
+        transit = Transit(cfg)
+        seen = []
+
+        def fetch(queries, key, language):
+            seen.append(queries[0].ids)
+            return ({sid: [] for sid in queries[0].ids if sid == "HSL:NEW"}, {}, {})
+
+        with mock.patch.object(hsl, "fetch", side_effect=fetch), \
+                mock.patch.object(hsl, "resolve_code", return_value="HSL:NEW") as lookup, self.assertLogs("glance", "WARNING"):
+            transit.refresh()   # HSL doesn't know the cached id
+            transit.refresh()   # so the code is looked up again
+            transit.refresh()
+        self.assertEqual(seen, [("HSL:OLD",), ("HSL:NEW",), ("HSL:NEW",)])
+        self.assertEqual(lookup.call_count, 1)
+        self.assertEqual(transit.code_ids, {"H0001": "HSL:NEW", "H0002": "HSL:ELSEWHERE"})  # unused codes left alone
+
+    def test_unknown_stop_code_is_looked_up_once(self):
+        from unittest import mock
+        from glance.__main__ import Transit
+        cfg = isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("H9999",))])
+        transit = Transit(cfg)
+        with mock.patch.object(hsl, "resolve_code", return_value=None) as lookup, \
+                mock.patch.object(hsl, "fetch", return_value=({}, {}, {})), self.assertLogs("glance", "WARNING"):
+            transit.refresh()
+            transit.refresh()
+        self.assertEqual(lookup.call_count, 1)
+
+
+class ServerTest(unittest.TestCase):
+    def setUp(self):
+        import threading
+        from http.server import ThreadingHTTPServer
+        from glance.__main__ import Transit, Weather, make_handler
+        # No key: placeholder departures, no network.
+        cfg = isolated_config(self)
+        self.battery = battery.Battery()
+        self.server = ThreadingHTTPServer(
+            ("127.0.0.1", 0), make_handler(cfg, Weather(cfg), Transit(cfg), None, self.battery)
+        )
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def test_image_has_sleep_header(self):
+        import urllib.request
+        with urllib.request.urlopen(self.base + "/glance.g2") as r:
+            self.assertEqual(r.headers["Content-Type"], "application/octet-stream")
+            self.assertTrue(r.headers["X-Glance-Sleep"])
+            self.assertEqual(len(r.read()), 96000)
+        self.get("/glance.g2?battery_mv=3840").read()
+        self.assertEqual(self.battery.level(datetime.now(HELSINKI)), 50)
+        for path in ("/glance.png", "/glance.png?refresh=1&battery_mv=bogus"):
+            with self.get(path) as r:
+                self.assertEqual(r.headers["Content-Type"], "image/png")
+                sleep = int(r.headers["X-Glance-Sleep"])
+                # config.toml's schedule: up to 15 min, plus the early-wake margin
+                # (27 s after a 15-minute sleep) and the 2 s offset.
+                self.assertTrue(1 <= sleep <= 15 * 60 + 27 + 2, sleep)
+                self.assertTrue(r.read().startswith(b"\x89PNG"))
+
+    def get(self, path, client=True):
+        """A request as the device or the preview page sends it (with the client header)."""
+        import urllib.request
+        from glance.__main__ import CLIENT_HEADER
+        return urllib.request.urlopen(urllib.request.Request(
+            self.base + path, headers={CLIENT_HEADER: "test"} if client else {}))
+
+    def test_sleep_header_counts_the_drawing_time(self):
+        # The device sleeps from when the answer arrives, not from when the request did.
+        import time
+        from unittest import mock
+        fixed = schedule.Plan(datetime.now(HELSINKI).replace(second=30), sleep_seconds=300, interval_minutes=5)
+        slow = render.render
+
+        def draw(*a):
+            time.sleep(1.6)
+            return slow(*a)
+
+        with mock.patch.object(schedule, "plan", return_value=fixed), mock.patch.object(render, "render", side_effect=draw):
+            with self.get("/glance.png") as r:
+                self.assertIn(int(r.headers["X-Glance-Sleep"]), (297, 298))
+
+    def test_changes_need_the_client_header(self):
+        # What a web page elsewhere can make a browser send: a plain GET.
+        from unittest import mock
+        from glance.__main__ import Transit
+        with mock.patch.object(Transit, "refresh") as refresh:
+            self.get("/glance.png?refresh=1&battery_mv=2600", client=False).read()
+            self.assertIsNone(self.battery.level(datetime.now(HELSINKI)))
+            self.assertNotIn(mock.call(10, wait_seconds=mock.ANY), refresh.mock_calls)  # not treated as a button press
+            self.get("/glance.png?refresh=1&battery_mv=3840").read()
+            self.assertEqual(self.battery.level(datetime.now(HELSINKI)), 50)
+            self.assertIn(mock.call(10, wait_seconds=mock.ANY), refresh.mock_calls)
+
+    def test_dripping_request_is_dropped(self):
+        # One byte at a time never trips a per-read timeout; the whole request has a deadline.
+        import socket, time
+        self.server.RequestHandlerClass.timeout = 0.5
+        started = time.monotonic()
+        with socket.create_connection(self.server.server_address) as s:
+            s.settimeout(0.1)
+            closed = False
+            while not closed and time.monotonic() - started < 5:
+                try:
+                    s.sendall(b"G")
+                    closed = s.recv(1) == b""
+                except TimeoutError:
+                    pass  # still open: nothing to read
+                except OSError:
+                    closed = True
+        self.assertTrue(closed)
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_malformed_request_line(self):
+        import socket
+        with socket.create_connection(self.server.server_address) as s:
+            s.sendall(b"GET http://[x/ HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+            s.settimeout(5)
+            self.assertIn(b" 400 ", s.recv(100))
+
+    def test_bursts_share_one_drawing(self):
+        import threading, urllib.request
+        from unittest import mock
+        with mock.patch.object(render, "render", wraps=render.render) as drawn:
+            threads = [
+                threading.Thread(target=lambda: urllib.request.urlopen(self.base + "/glance.png").read())
+                for _ in range(8)
+            ]
+            for t in threads:
+                t.start()
+            for t in threads:
+                t.join()
+        # One drawing, or two if the minute changed in between: not eight.
+        self.assertLessEqual(drawn.call_count, 2)
+
+    def test_idle_connection_is_dropped(self):
+        import socket
+        self.server.RequestHandlerClass.timeout = 0.2
+        with socket.create_connection(self.server.server_address) as s:
+            s.settimeout(5)
+            self.assertEqual(s.recv(1), b"")  # closed by the server, not held open
+
+    def test_foreign_host_is_refused(self):
+        import urllib.error, urllib.request
+        def get(host):
+            req = urllib.request.Request(self.base + "/glance.png", headers={"Host": host})
+            try:
+                return urllib.request.urlopen(req).status
+            except urllib.error.HTTPError as e:
+                return e.code
+        self.assertEqual(get("rebind.attacker.example:8080"), 403)
+        self.assertEqual(get("192.168.1.50:8080"), 200)
+
+    def test_host_allowed(self):
+        from glance.__main__ import host_allowed
+        for host in (None, "", "192.168.1.50:8080", "10.0.0.2", "[fe80::1]:8080", "[::1]", "localhost:8080",
+                     "raspberrypi:8080", "Glance.local:8080", "glance.local.", "app.localhost"):
+            self.assertTrue(host_allowed(host), host)
+        for host in ("attacker.example", "attacker.example:8080", "192.168.1.50.attacker.example",
+                     "glance.local.attacker.example", "a b", "[nonsense]", "x.local@attacker.example"):
+            self.assertFalse(host_allowed(host), host)
+        self.assertTrue(host_allowed("glance.home.example:8080", ("glance.home.example",)))
+        self.assertTrue(host_allowed("my_pi.lan", ("my_pi.lan",)))  # listed names count as they are
+        self.assertTrue(host_allowed("my_pi:8080"))
+
+    def test_log_escapes_control_characters(self):
+        from glance.__main__ import log_safe
+        self.assertEqual(log_safe('"GET /x\x1b[31m\x08 HTTP/1.1" 404 -'), '"GET /x\\x1b[31m\\x08 HTTP/1.1" 404 -')
+        self.assertEqual(log_safe("a\\b\n"), "a\\\\b\\x0a")
+        self.assertEqual(log_safe("Länsisatama 5°"), "Länsisatama 5°")
+
+
+if __name__ == "__main__":
+    unittest.main()

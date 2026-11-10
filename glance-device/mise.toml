@@ -1,0 +1,20 @@
+# Firmware build tools. `mise install` (in this folder) sets them up.
+# PlatformIO downloads the ESP32 toolchain and libraries itself, into
+# ~/.platformio and .pio/, on first build.
+
+[tools]
+python = "3.13"              # for PlatformIO
+uv = "0.13.7"                # mise's pipx backend installs PlatformIO with it
+"pipx:platformio" = "6.2.0"
+
+[tasks.build]
+description = "Build the firmware"
+run = "pio run"
+
+[tasks.upload]
+description = "Build and flash the reTerminal (on USB-C)"
+run = "pio run -t upload"
+
+[tasks.monitor]
+description = "Show the device log (opening it resets the device)"
+run = "pio device monitor"

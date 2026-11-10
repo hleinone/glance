@@ -1,0 +1,54 @@
+# systemd *user* unit for the Glance server: runs as the deploying user, so
+# deploys and restarts need no sudo. deploy.sh fills in @DIR@ and installs it
+# as ~/.config/systemd/user/glance.service. Starting at boot without a login
+# needs "linger", enabled once with:  sudo loginctl enable-linger $USER
+#
+#   journalctl --user-unit glance -f      follow the log
+#   systemctl --user restart glance       after changing config.toml
+
+[Unit]
+Description=Glance e-paper dashboard server
+# No After=network-online.target: a user manager has no such target. The wait
+# for network time below covers it, and the server copes with no network.
+
+[Service]
+WorkingDirectory=@DIR@
+# The Pi has no real-time clock: give network time up to two minutes to sync
+# before drawing clocks (a user unit can't wait for time-sync.target), then
+# start anyway. systemd's own limit for starting must be longer than that
+# wait (its default is 90 s, which would end the wait as a failed start).
+ExecStartPre=-/usr/bin/timeout 120 sh -c 'until [ "$(timedatectl show -p NTPSynchronized --value)" = yes ]; do sleep 2; done'
+TimeoutStartSec=150
+ExecStart=@DIR@/.venv/bin/python -m glance serve
+Environment=PYTHONUNBUFFERED=1
+Restart=on-failure
+RestartSec=10
+
+# Sandbox. The server answers anyone on the home network and runs as a login
+# user, so it gets only what it needs: of the home directory it sees just its
+# own folder, read-only except cache/ (which deploy.sh creates; a [cache] dir
+# elsewhere must be added to BindPaths), the rest of the system read-only, and
+# no way to gain privileges. All of this works in a user unit without root
+# (checked on Raspberry Pi OS 13, systemd 257).
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindReadOnlyPaths=@DIR@
+BindPaths=@DIR@/cache
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+# Each connection is a thread: a flood can't start more than this.
+TasksMax=64
+
+[Install]
+WantedBy=default.target
