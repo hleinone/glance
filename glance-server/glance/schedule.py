@@ -1,7 +1,8 @@
 """When the device should wake next, and what moment an image is drawn for.
 
 The device wakes on a schedule from config.toml: rules like "Mon-Fri
-07:00-09:00 every minute", a default interval otherwise. Wakes land on the
+07:00-09:00 every minute", a default interval otherwise. The same rules pick
+the deck of screens shown (glance/decks.py). Wakes land on the
 schedule's minutes (multiples of the interval since midnight), aimed a couple
 of seconds after the minute changes so the clock on screen is right. The
 device's sleep timer drifts a little, so a request that arrives a few seconds
@@ -39,6 +40,7 @@ class WakeRule:
     start: int  # minutes since midnight
     end: int  # exclusive; end <= start means the rule runs past midnight
     every: int  # minutes between wakes
+    deck: str | None = None  # None = the schedule's default deck
 
     def covers(self, t: datetime) -> bool:
         if t.weekday() not in self.days:
@@ -53,12 +55,21 @@ class WakeRule:
 class WakeSchedule:
     rules: tuple[WakeRule, ...] = ()  # the first matching rule wins
     default_every: int = 1
+    default_deck: str = ""
 
-    def interval_at(self, t: datetime) -> int:
+    def rule_at(self, t: datetime) -> WakeRule | None:
         for rule in self.rules:
             if rule.covers(t):
-                return rule.every
-        return self.default_every
+                return rule
+        return None
+
+    def interval_at(self, t: datetime) -> int:
+        rule = self.rule_at(t)
+        return rule.every if rule else self.default_every
+
+    def deck_at(self, t: datetime) -> str:
+        rule = self.rule_at(t)
+        return rule.deck if rule and rule.deck else self.default_deck
 
     def is_wake(self, t: datetime) -> bool:
         """Whether the minute t falls in is one the device wakes for."""
@@ -131,12 +142,15 @@ def next_boundary(now: datetime, interval_minutes: int) -> datetime:
 
 
 class Prerendered:
-    """The image drawn in advance for one upcoming minute.
+    """Images drawn in advance for one upcoming minute: the screen showing and
+    its neighbours in the deck.
 
     Drawing takes ~2.5 s on a Pi 1, too long to keep the device's radio on for,
-    so the server draws each minute's image just before the minute starts.
-    It is served only to requests near the start of that minute (when the
-    device wakes); later requests get a fresh image with exact countdowns.
+    so the server draws each wake minute's image just before the minute starts.
+    It is served to requests near the start of that minute (when the device
+    wakes); later requests get a fresh image with exact countdowns. The
+    neighbours are for a button press that changes the screen: anywhere in the
+    same minute, a quick answer matters more than countdowns a few seconds old.
     """
 
     MAX_LATE = timedelta(seconds=20)
@@ -144,18 +158,30 @@ class Prerendered:
     def __init__(self) -> None:
         # One tuple, swapped in a single assignment, so readers in other
         # threads never pair one minute with another minute's image.
-        self._entry: tuple[datetime, dict[str, bytes]] | None = None
+        self._entry: tuple[datetime, object, dict[str, dict[str, bytes]]] | None = None
 
-    def put(self, minute: datetime, images: dict[str, bytes]) -> None:
-        """images: encoded image per URL path ("/glance.png", "/glance.g2")."""
-        self._entry = (minute, images)
+    def put(self, minute: datetime, screen: str, images: dict[str, bytes], data: object = None) -> None:
+        """images: encoded image per URL path ("/glance.png", "/glance.g2").
+        Screens put for the same minute are kept together.
 
-    def get(self, display_time: datetime, path: str) -> bytes | None:
+        data: what the images were drawn from (the departures' fetch time).
+        A `get` naming other data finds nothing: when a slow fetch lands
+        after the drawing, the request draws afresh instead of showing the
+        device the previous poll's departures for a whole interval."""
+        entry = self._entry
+        screens = dict(entry[2]) if entry and entry[:2] == (minute, data) else {}
+        screens[screen] = images
+        self._entry = (minute, data, screens)
+
+    def get(self, display_time: datetime, screen: str, path: str,
+            max_late: timedelta = MAX_LATE, data: object = None) -> bytes | None:
         entry = self._entry
         minute = display_time.replace(second=0, microsecond=0)
-        if entry is None or entry[0] != minute or display_time - minute > self.MAX_LATE:
+        if entry is None or entry[0] != minute or display_time - minute > max_late:
             return None
-        return entry[1].get(path)
+        if data is not None and entry[1] != data:
+            return None
+        return entry[2].get(screen, {}).get(path)
 
 
 class Recent:

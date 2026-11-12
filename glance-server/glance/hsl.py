@@ -16,6 +16,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from . import upstream
 from .departures import Departure
 
 log = logging.getLogger(__name__)
@@ -27,8 +28,15 @@ GEOCODING_ENDPOINT = "https://api.digitransit.fi/geocoding/v1/search"
 TRUNK_ROUTE_TYPE = 702
 USER_AGENT = "glance-dashboard/0.1"
 # Seconds. Departures are polled 15 s before the minute and must be back, and
-# the image drawn, before the device wakes just after it.
+# the image drawn, before the device wakes just after it. TIMEOUT is for each
+# step (connecting, each read), DEADLINE for the whole answer.
 TIMEOUT = 8
+DEADLINE = 10
+# Text from the API is drawn as it comes; fitting it shrinks and cuts one
+# character at a time, so absurdly long text is cut here first.
+MAX_TEXT = 80
+# Departures dated outside these years are left out, like fmi.YEARS.
+YEARS = range(2000, 2100)
 
 DEPARTURES_QUERY = """
 query Departures($ids: [String], $n: Int, $lang: String) {
@@ -73,8 +81,7 @@ class HSLError(Exception):
 
 def _request(req: urllib.request.Request) -> dict:
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            payload = json.load(resp)
+        payload = json.loads(upstream.read(req, TIMEOUT, DEADLINE))
     except urllib.error.HTTPError as e:
         hint = " (check the Digitransit key)" if e.code in (401, 403) else ""
         raise HSLError(f"HTTP {e.code}{hint}") from e
@@ -110,6 +117,14 @@ def _unexpected(read):
         return read()
     except (AttributeError, KeyError, TypeError, ValueError, OverflowError, OSError) as e:
         raise HSLError(f"unexpected response: {type(e).__name__}: {e}") from e
+
+
+def _text(value) -> str:
+    """A text field of an answer, cut to MAX_TEXT. Anything but text (a
+    number, a list) is a response of the wrong shape: drawing it would fail."""
+    if not isinstance(value, str):
+        raise TypeError(f"expected text, not {type(value).__name__}")
+    return value[:MAX_TEXT]
 
 
 def is_gtfs_id(ref: str) -> bool:
@@ -179,28 +194,31 @@ def parse_departures(data: dict) -> dict[str, list[Departure]]:
                 seconds = st.get("scheduledDeparture")
             if st.get("serviceDay") is None or seconds is None:
                 continue
+            when = datetime.fromtimestamp(st["serviceDay"] + seconds, UTC)
+            if when.year not in YEARS:
+                continue
             deps.append(
                 Departure(
-                    route=route.get("shortName") or "?",
-                    headsign=short_headsign(st.get("headsign") or trip.get("tripHeadsign") or ""),
-                    time=datetime.fromtimestamp(st["serviceDay"] + seconds, UTC),
+                    route=_text(route.get("shortName") or "?"),
+                    headsign=short_headsign(_text(st.get("headsign") or trip.get("tripHeadsign") or "")),
+                    time=when,
                     realtime=bool(st.get("realtime")),
-                    mode=(route.get("mode") or "BUS").lower(),
+                    mode=_text(route.get("mode") or "BUS").lower(),
                     trunk=route.get("type") == TRUNK_ROUTE_TYPE,
                 )
             )
-        out[stop["gtfsId"]] = deps
+        out[_text(stop["gtfsId"])] = deps
     return out
 
 
 def parse_stop_names(data: dict) -> dict[str, str]:
     """Map stop gtfsId -> stop name, from a DEPARTURES_QUERY response's `data`."""
-    return {s["gtfsId"]: s["name"] for s in data.get("stops") or [] if s and s.get("name")}
+    return {s["gtfsId"]: _text(s["name"]) for s in data.get("stops") or [] if s and s.get("name")}
 
 
 def parse_stop_modes(data: dict) -> dict[str, str]:
     """Map stop gtfsId -> vehicle mode ("tram", "bus", ...), from a DEPARTURES_QUERY response."""
-    return {s["gtfsId"]: s["vehicleMode"].lower() for s in data.get("stops") or [] if s and s.get("vehicleMode")}
+    return {s["gtfsId"]: _text(s["vehicleMode"]).lower() for s in data.get("stops") or [] if s and s.get("vehicleMode")}
 
 
 def select(by_stop: dict[str, list[Departure]], q: StopQuery) -> list[Departure]:

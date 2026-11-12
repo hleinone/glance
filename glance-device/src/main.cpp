@@ -1,11 +1,13 @@
 // Glance firmware: on every wake, read the battery, connect to Wi-Fi, fetch the
 // image the server renders, draw it in the panel's 4 greys, then deep-sleep
 // for as long as the server says (X-Glance-Sleep). Each wake starts from
-// setup(). A press on any of the three buttons wakes it early and asks the
-// server for fresh data (?refresh=1). The battery voltage goes along with
-// every request (?battery_mv=), and the server draws the level. An update that
-// asks for fresh data first draws a small "refreshing" mark in the status bar,
-// since the new image takes 10 s or more to appear.
+// setup(). A press on any of the three buttons wakes it early: the two white
+// ones on the left step through the server's deck of screens (?button=prev,
+// ?button=next), the green one on the right asks for fresh data
+// (?button=refresh). The battery voltage goes along with every request
+// (?battery_mv=), and the server draws the level. An update for a press first
+// draws a small "refreshing" mark in the status bar, since the new image takes
+// 8 s or more to appear.
 //
 // The image comes as /glance.g2: the panel's own 4 greys at 2 bits per pixel
 // (4 pixels per byte, first pixel in the top bits, 0 = black .. 3 = white =
@@ -22,6 +24,7 @@
 #include <driver/rtc_io.h>
 #include <esp_sleep.h>
 #include <esp_timer.h>
+#include <sys/time.h>
 
 #include "TFT_eSPI.h"
 #include "secrets.h"
@@ -44,15 +47,46 @@ static constexpr size_t G2_BYTES = WIDTH * HEIGHT / 4;
 static constexpr uint32_t WIFI_TIMEOUT_MS = 10000;
 static constexpr uint32_t HTTP_CONNECT_TIMEOUT_MS = 4000;
 static constexpr uint32_t HTTP_TIMEOUT_MS = 10000;
-// Buttons: right = GPIO3, middle = GPIO4, left = GPIO5 (checked on the
-// device). Any of them wakes it, and the log says which one did. Pressed = low.
+// Buttons: right = GPIO3 (green), middle = GPIO4, left = GPIO5 (both white;
+// checked on the device). Any of them wakes it. Pressed = low.
 static constexpr gpio_num_t BUTTONS[] = {GPIO_NUM_3, GPIO_NUM_4, GPIO_NUM_5};
+enum Button : uint8_t { NO_BUTTON, REFRESH, NEXT, PREV };
+static constexpr Button BUTTON_ACTION[] = {REFRESH, NEXT, PREV};  // by BUTTONS index
+static const char *const BUTTON_NAME[] = {"none", "refresh", "next", "prev"};  // as the server's ?button=
 // Battery: GPIO21 switches on the voltage divider read on GPIO1 (half the
 // battery voltage).
 static constexpr int PIN_BATTERY_ADC = 1;
 static constexpr int PIN_BATTERY_EN = 21;
 
 static constexpr int DEFAULT_SLEEP_S = 60;  // if the server doesn't say
+// The shortest sleeps the server may ask for repeatedly. One short sleep is
+// normal (an update just before a wake minute), several in a row are not: a
+// server fault that kept answering "1 s" would have the panel refreshing all
+// the time until the battery was flat. After SHORT_SLEEPS_ALLOWED sleeps of
+// SHORT_SLEEP_S or less in a row, the device sleeps DEFAULT_SLEEP_S instead.
+static constexpr int SHORT_SLEEP_S = 10;
+static constexpr uint8_t SHORT_SLEEPS_ALLOWED = 2;
+RTC_DATA_ATTR static uint8_t short_sleeps = 0;  // in a row, kept across deep sleep
+// The longest the device stays awake. A normal update takes ~9 s, the worst
+// one (slow Wi-Fi, two fetches, both marks) under a minute. Without a limit,
+// anything that never returns keeps it awake until the battery is flat: the
+// display library waits for the panel's BUSY line with no timeout (its
+// CHECK_BUSY), so a panel that stopped answering would do that. At the limit
+// the update counts as failed and the device sleeps (see on_awake_limit).
+static constexpr uint64_t AWAKE_LIMIT_US = 90ULL * 1000 * 1000;
+// Times in a row the limit ran out, kept across deep sleep; back to 0 when an
+// update reaches its sleep by itself. It has its own count because `failures`
+// is back at 0 once the image has arrived, before the panel refresh: a panel
+// that hangs in the refresh would otherwise get the shortest retry every time
+// (90 s awake, 30 s asleep, for ever).
+RTC_DATA_ATTR static uint32_t awake_limit_hits = 0;
+// A battery reading below this means the cell is empty (the server's curve
+// calls 3270 mV 0 %). Wi-Fi and a panel refresh would only pull it lower, so
+// the device skips the update and looks again later; on the charger the
+// reading rises and updates resume. A reading of 0 (implausible, e.g. no
+// battery fitted) doesn't count.
+static constexpr int BATTERY_EMPTY_MV = 3300;
+static constexpr int BATTERY_EMPTY_SLEEP_S = 15 * 60;
 // The longest sleep accepted from the server. Its schedule never asks for
 // more than a day; a larger value (a bug, or something else answering at the
 // server's address over plain HTTP) would leave the screen dead for weeks,
@@ -66,7 +100,21 @@ RTC_DATA_ATTR static uint32_t failures = 0;  // consecutive, kept across deep sl
 // From this many failures in a row, mark the screen as offline (once per outage).
 static constexpr uint32_t OFFLINE_MARK_AFTER = 3;
 RTC_DATA_ATTR static bool offline_mark_shown = false;
+// Screens in the server's current deck, from its last answer (0 = not known
+// yet). On a deck of one, a white button has nothing to change, so a press is
+// ignored without waking the radio.
+RTC_DATA_ATTR static uint8_t deck_size = 0;
+// When the timer wake planned at the last sleep is due, in rtc_now_ms() terms:
+// a press that is ignored goes back to sleep until then.
+RTC_DATA_ATTR static int64_t wake_due_ms = 0;
 
+// Milliseconds on the RTC timer, which keeps counting through deep sleep
+// (millis() starts over at every wake).
+static int64_t rtc_now_ms() {
+  timeval tv;
+  gettimeofday(&tv, nullptr);
+  return int64_t(tv.tv_sec) * 1000 + tv.tv_usec / 1000;
+}
 EPaper epaper;
 
 // --- battery ----------------------------------------------------------------------
@@ -141,6 +189,8 @@ static bool connect_wifi() {
 
 struct Fetch {
   bool ok = false;
+  bool answered = false;          // the server got the request (any HTTP status)
+  bool no_change = false;         // 204: nothing to draw (a white button on a deck of one)
   int sleep_s = DEFAULT_SLEEP_S;  // as the server said when it answered
   uint32_t answered_at = 0;       // millis() when the response arrived
 };
@@ -148,11 +198,11 @@ struct Fetch {
 // Fetch the image into the frame buffer. On failure the frame buffer may be
 // partly overwritten, but the panel keeps showing the previous image, since
 // it only changes on update().
-static Fetch fetch_and_draw(int battery_mv, bool refresh) {
+static Fetch fetch_and_draw(int battery_mv, Button button) {
   Fetch result;
   String url = GLANCE_URL;
   url += "?battery_mv=" + String(battery_mv);
-  if (refresh) url += "&refresh=1";
+  if (button != NO_BUTTON) url += String("&button=") + BUTTON_NAME[button];
   HTTPClient http;
   http.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
   http.setTimeout(HTTP_TIMEOUT_MS);
@@ -161,13 +211,14 @@ static Fetch fetch_and_draw(int battery_mv, bool refresh) {
   // with this header: a web page can make a browser at home send a plain GET
   // to the server, but not one with a header of its own.
   http.addHeader("X-Glance-Client", "device");
-  const char *headers[] = {"X-Glance-Sleep"};
-  http.collectHeaders(headers, 1);
+  const char *headers[] = {"X-Glance-Sleep", "X-Glance-Deck-Size"};
+  http.collectHeaders(headers, 2);
 
   const uint32_t start = millis();
   const int code = http.GET();
   result.answered_at = millis();
-  if (code != HTTP_CODE_OK) {
+  result.answered = code > 0;
+  if (code != HTTP_CODE_OK && code != HTTP_CODE_NO_CONTENT) {
     LOG.printf("[http] GET failed: %d %s\n", code, http.errorToString(code).c_str());
     http.end();
     return result;
@@ -178,6 +229,14 @@ static Fetch fetch_and_draw(int battery_mv, bool refresh) {
     result.sleep_s = MAX_SLEEP_S;
   } else if (sleep_s > 0) {
     result.sleep_s = sleep_s;
+  }
+  const int size = http.header("X-Glance-Deck-Size").toInt();
+  if (size > 0) deck_size = min(size, 255);
+  if (code == HTTP_CODE_NO_CONTENT) {
+    LOG.printf("[http] no change (deck of %d), sleep %d s\n", size, result.sleep_s);
+    http.end();
+    result.ok = result.no_change = true;
+    return result;
   }
   if (http.getSize() != (int)G2_BYTES) {
     LOG.printf("[http] unexpected size %d (want %u)\n", http.getSize(), G2_BYTES);
@@ -336,21 +395,22 @@ static void panel_off() {
 // --- buttons while awake -------------------------------------------------------------
 
 // A press while awake (during an update) can't wake us, so catch it with an
-// interrupt and do another update with fresh data right after this one.
+// interrupt and do another update for it right after this one.
 //
 // Only falling edges (press = low) are used, never the pin's current level:
 // during the panel refresh Seeed's driver keeps interrupts blocked for long
 // stretches, so the handler can run after the button is already released.
-// Bounces don't matter (one press or several, the result is one refresh). The
-// button that woke us is ignored for its first second: that's its release
-// bouncing, not a new press.
+// Bounces don't matter (one press or several, the result is one update, for
+// the button pressed last). The button that woke us is ignored for its first
+// second: that's its release bouncing, not a new press.
 static constexpr int NUM_BUTTONS = sizeof(BUTTONS) / sizeof(BUTTONS[0]);
 static constexpr uint32_t WAKE_BUTTON_IGNORE_MS = 1000;
 static volatile uint32_t armed_at[NUM_BUTTONS];  // ignore edges before this (ms since boot)
 static volatile bool pressed_awake[NUM_BUTTONS];
 static volatile uint32_t edges[NUM_BUTTONS];     // for the log
+static volatile int last_pressed = -1;           // BUTTONS index of the latest press while awake
 // A press while awake, or one whose update failed: carried over sleep to the next update.
-RTC_DATA_ATTR static bool refresh_pending = false;
+RTC_DATA_ATTR static Button pending_button = NO_BUTTON;
 
 // Interrupt context, possibly while flash is busy (Wi-Fi does that): only
 // IRAM-safe calls (no millis(); esp_timer_get_time() is safe).
@@ -358,7 +418,10 @@ static void IRAM_ATTR on_button_press(void *arg) {
   const int i = (int)(intptr_t)arg;
   const uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
   edges[i] = edges[i] + 1;
-  if ((int32_t)(now - armed_at[i]) >= 0) pressed_awake[i] = true;
+  if ((int32_t)(now - armed_at[i]) >= 0) {
+    pressed_awake[i] = true;
+    last_pressed = i;
+  }
 }
 
 static void watch_buttons() {
@@ -369,30 +432,91 @@ static void watch_buttons() {
     armed_at[i] = down ? (uint32_t)(esp_timer_get_time() / 1000) + WAKE_BUTTON_IGNORE_MS : 0;
     pressed_awake[i] = false;
     edges[i] = 0;
+    last_pressed = -1;
     attachInterruptArg(BUTTONS[i], on_button_press, (void *)(intptr_t)i, FALLING);
   }
   LOG.println();
 }
 
-// True if a button was pressed while awake (and logs which).
-static bool pressed_while_awake() {
-  bool any = false;
+// Whether a white button has anything to do: not on a deck of one screen.
+static bool worth_doing(Button b) {
+  return !((b == PREV || b == NEXT) && deck_size == 1);
+}
+
+// The button pressed last while awake (and logs them), or NO_BUTTON.
+static Button pressed_while_awake() {
   for (int i = 0; i < NUM_BUTTONS; i++) {
     if (edges[i]) LOG.printf("[button] GPIO%d: %lu edges while awake\n", BUTTONS[i], (unsigned long)edges[i]);
-    if (pressed_awake[i]) {
-      LOG.printf("[button] GPIO%d pressed while awake\n", BUTTONS[i]);
-      any = true;
-    }
+    if (pressed_awake[i]) LOG.printf("[button] GPIO%d pressed while awake\n", BUTTONS[i]);
   }
-  return any;
+  const int i = last_pressed;
+  return i >= 0 ? BUTTON_ACTION[i] : NO_BUTTON;
+}
+
+// Wake from deep sleep on any button (pressed = low). The RTC domain stays
+// powered so the internal pull-ups hold the pins high while asleep. A button
+// that is already down (held, or stuck) is left out, or it would wake us at
+// once.
+static void wake_on_buttons() {
+  uint64_t mask = 0;
+  for (gpio_num_t pin : BUTTONS) {
+    rtc_gpio_pullup_en(pin);
+    rtc_gpio_pulldown_dis(pin);
+    if (digitalRead(pin) == HIGH) mask |= 1ULL << pin;
+  }
+  if (mask) {
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+    esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_LOW);
+  }
+}
+
+// Seconds to the retry after a failed update: longer the more have gone wrong
+// in a row (failed updates, or updates that ran into the awake limit).
+static int retry_sleep_s() {
+  const size_t n = sizeof(RETRY_SLEEP_S) / sizeof(RETRY_SLEEP_S[0]);
+  const uint32_t in_a_row = max<uint32_t>(max<uint32_t>(failures, awake_limit_hits), 1);
+  return RETRY_SLEEP_S[min<size_t>(in_a_row, n) - 1];
+}
+
+// The awake limit ran out: setup() is stuck somewhere (see AWAKE_LIMIT_US).
+// Runs in the esp_timer task, beside the stuck setup(), so it does the least
+// it can: count a failed update, set the wake-ups, sleep. Deep sleep powers
+// the radio down whatever state Wi-Fi was in.
+static void on_awake_limit(void *) {
+  failures = failures + 1;
+  awake_limit_hits = awake_limit_hits + 1;
+  const int retry_s = retry_sleep_s();
+  LOG.println("[glance] still awake at the limit: giving up on this update");
+  LOG.flush();
+  wake_due_ms = rtc_now_ms() + retry_s * 1000LL;
+  esp_sleep_enable_timer_wakeup(uint64_t(retry_s) * 1000000ULL);
+  wake_on_buttons();
+  esp_deep_sleep_start();
+}
+
+static void start_awake_limit() {
+  esp_timer_create_args_t args = {};
+  args.callback = on_awake_limit;
+  args.name = "awake_limit";
+  esp_timer_handle_t timer = nullptr;
+  if (esp_timer_create(&args, &timer) != ESP_OK || esp_timer_start_once(timer, AWAKE_LIMIT_US) != ESP_OK)
+    LOG.println("[glance] could not start the awake limit");
 }
 
 static void deep_sleep(uint32_t ms) {
-  if (pressed_while_awake()) {
-    refresh_pending = true;
+  awake_limit_hits = 0;  // got here by itself: nothing hung
+  const Button pressed = pressed_while_awake();
+  if (pressed != NO_BUTTON && worth_doing(pressed)) {
+    pending_button = pressed;
     ms = 500;  // come straight back for the update the press asked for
+  } else if (pressed != NO_BUTTON) {
+    LOG.printf("[button] %s: one screen in the deck, nothing to change\n", BUTTON_NAME[pressed]);
   }
-  for (gpio_num_t pin : BUTTONS) detachInterrupt(pin);
+  wake_due_ms = rtc_now_ms() + ms;
+  for (gpio_num_t pin : BUTTONS) {
+    detachInterrupt(pin);
+    if (digitalRead(pin) == LOW) LOG.printf("[button] GPIO%d is low, not waking on it\n", pin);
+  }
   LOG.printf("[glance] deep sleep %lu ms\n", ms);
   LOG.flush();
   if (WiFi.getMode() != WIFI_OFF) {
@@ -400,63 +524,101 @@ static void deep_sleep(uint32_t ms) {
     WiFi.mode(WIFI_OFF);
   }
   esp_sleep_enable_timer_wakeup(uint64_t(ms) * 1000ULL);
-  // Wake on any button (pressed = low). The RTC domain stays powered so the
-  // internal pull-ups hold the pins high while asleep. A button that is
-  // already down (held, or stuck) is left out, or it would wake us at once.
-  uint64_t mask = 0;
-  for (gpio_num_t pin : BUTTONS) {
-    rtc_gpio_pullup_en(pin);
-    rtc_gpio_pulldown_dis(pin);
-    if (digitalRead(pin) == HIGH) mask |= 1ULL << pin;
-    else LOG.printf("[button] GPIO%d is low, not waking on it\n", pin);
-  }
-  if (mask) {
-    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
-    esp_sleep_enable_ext1_wakeup(mask, ESP_EXT1_WAKEUP_ANY_LOW);
-  }
+  wake_on_buttons();
   esp_deep_sleep_start();
+}
+
+// How long to sleep after an update the server answered: what it said, less
+// what has passed since its answer arrived (download, refresh), so wakes
+// don't drift later. Not short sleeps over and over, though (SHORT_SLEEP_S).
+static uint32_t sleep_ms_after(const Fetch &fetch) {
+  int sleep_s = fetch.sleep_s;
+  if (sleep_s > SHORT_SLEEP_S) {
+    short_sleeps = 0;
+  } else if (short_sleeps < SHORT_SLEEPS_ALLOWED) {
+    short_sleeps++;
+  } else {
+    LOG.printf("[glance] the server keeps asking for short sleeps (%d s): sleeping %d s\n", sleep_s, DEFAULT_SLEEP_S);
+    sleep_s = DEFAULT_SLEEP_S;
+  }
+  const uint32_t elapsed = millis() - fetch.answered_at;
+  const uint32_t want = sleep_s * 1000UL;
+  return want > elapsed + 1000 ? want - elapsed : 1000;
 }
 
 void setup() {
   const uint32_t boot = millis();
   LOG.begin(115200, SERIAL_8N1, PIN_LOG_RX, PIN_LOG_TX);
+  start_awake_limit();
   // Hand the button pins back from the RTC (sleep-time) domain to normal GPIO.
   for (gpio_num_t pin : BUTTONS) {
     rtc_gpio_deinit(pin);
     pinMode(pin, INPUT_PULLUP);
   }
   const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
-  const bool button_wake = cause == ESP_SLEEP_WAKEUP_EXT1;
   watch_buttons();
-  const bool refresh = button_wake || refresh_pending;
-  refresh_pending = false;
-  if (button_wake) {
+  Button button = pending_button;
+  pending_button = NO_BUTTON;
+  if (cause == ESP_SLEEP_WAKEUP_EXT1) {
     const uint64_t pins = esp_sleep_get_ext1_wakeup_status();
-    for (gpio_num_t pin : BUTTONS)
-      if (pins & (1ULL << pin)) LOG.printf("\n[glance] button wake: GPIO%d\n", pin);
+    for (int i = 0; i < NUM_BUTTONS; i++)
+      if (pins & (1ULL << BUTTONS[i])) button = BUTTON_ACTION[i];
+    LOG.printf("\n[glance] button wake: %s\n", BUTTON_NAME[button]);
+    if (!worth_doing(button)) {
+      // A white button on a deck of one: nothing to change, so no radio and
+      // no panel. Back to sleep until the planned wake.
+      const int64_t left = wake_due_ms - rtc_now_ms();
+      LOG.printf("[button] one screen in the deck, nothing to change; %lld ms to the planned wake\n", (long long)left);
+      if (left > 1000) deep_sleep(left);
+      button = NO_BUTTON;  // the planned wake is due anyway: a normal update
+    }
   } else {
-    LOG.printf("\n[glance] %s%s\n", cause == ESP_SLEEP_WAKEUP_TIMER ? "timer wake" : "power on / reset",
-               refresh ? " (refresh: button pressed while awake)" : "");
+    LOG.printf("\n[glance] %s%s%s\n", cause == ESP_SLEEP_WAKEUP_TIMER ? "timer wake" : "power on / reset",
+               button != NO_BUTTON ? ", for a press: " : "", button != NO_BUTTON ? BUTTON_NAME[button] : "");
   }
   const int battery_mv = read_battery_mv();
   LOG.printf("[battery] %d mV\n", battery_mv);
+  if (battery_mv > 0 && battery_mv < BATTERY_EMPTY_MV) {
+    // Before the panel and the radio are powered: see BATTERY_EMPTY_MV.
+    LOG.printf("[battery] empty: no update, looking again in %d s\n", BATTERY_EMPTY_SLEEP_S);
+    deep_sleep(BATTERY_EMPTY_SLEEP_S * 1000UL);
+  }
   epaper.begin();
   start_wifi();
-  // Fresh data takes a while (the server refetches and redraws, then the
-  // panel's 6 s refresh): show at once that the press was noticed. Wi-Fi
-  // connects meanwhile, so this costs little or no extra time awake.
-  const bool refresh_mark = refresh && show_mark(draw_refresh_icon, "refreshing");
+  // A press takes a while to show (the server draws, then the panel's 6 s
+  // refresh): show at once that it was noticed. Wi-Fi connects meanwhile, so
+  // this costs little or no extra time awake.
+  const bool refresh_mark = button != NO_BUTTON && show_mark(draw_refresh_icon, "refreshing");
   epaper.initGrayMode(GRAY_LEVEL4);
 
   Fetch fetch;
-  if (connect_wifi()) fetch = fetch_and_draw(battery_mv, refresh);
+  if (connect_wifi()) {
+    fetch = fetch_and_draw(battery_mv, button);
+    if (fetch.no_change && refresh_mark) {
+      // The deck turned out to have one screen after all (it changed since the
+      // last update), and the mark is up with nothing under it: fetch the
+      // image as a timed wake would, to replace it.
+      LOG.println("[glance] mark up but nothing changed: fetching the image to replace it");
+      fetch = fetch_and_draw(battery_mv, NO_BUTTON);
+    }
+  }
+  if (fetch.no_change) {
+    // Nothing to draw: the panel keeps its image. Sleep as the server said.
+    if (failures) LOG.printf("[glance] back online after %lu failed updates\n", (unsigned long)failures);
+    failures = 0;
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    panel_off();
+    deep_sleep(sleep_ms_after(fetch));
+  }
   if (!fetch.ok) {
-    // A button press that didn't get through still wants fresh data: the
-    // retry is a timer wake, so carry the request over to it.
-    if (refresh) refresh_pending = true;
+    // A press that didn't get through still wants doing: the retry is a timer
+    // wake, so carry it over. Not a screen step the server already made (it
+    // answered, then the download failed): that would step twice. The retry
+    // shows the new screen anyway.
+    if (button == REFRESH || (button != NO_BUTTON && !fetch.answered)) pending_button = button;
     failures++;
-    const size_t n = sizeof(RETRY_SLEEP_S) / sizeof(RETRY_SLEEP_S[0]);
-    const int retry_s = RETRY_SLEEP_S[min<size_t>(failures, n) - 1];
+    const int retry_s = retry_sleep_s();
     LOG.printf("[glance] update failed (%lu in a row), retrying in %d s\n", (unsigned long)failures, retry_s);
     if (WiFi.getMode() != WIFI_OFF) {
       WiFi.disconnect(true);
@@ -482,11 +644,7 @@ void setup() {
   const uint32_t refresh_start = millis();
   epaper.update();  // full 4-grey refresh; wakes and re-sleeps the panel itself
   LOG.printf("[epd] refreshed in %lu ms; awake %lu ms in all\n", millis() - refresh_start, millis() - boot);
-  // The server timed the sleep from when it answered: subtract what has
-  // passed since (download, refresh), so wakes don't drift later.
-  const uint32_t elapsed = millis() - fetch.answered_at;
-  const uint32_t want = fetch.sleep_s * 1000UL;
-  deep_sleep(want > elapsed + 1000 ? want - elapsed : 1000);
+  deep_sleep(sleep_ms_after(fetch));
 }
 
 void loop() {}  // never reached: setup() always ends in deep sleep

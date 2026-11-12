@@ -1,0 +1,33 @@
+"""Everything a screen is drawn from: the time, the language and the data."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from . import fmi
+from .departures import StopDepartures
+
+
+@dataclass(frozen=True)
+class Scene:
+    now: datetime  # local, aware
+    language: str
+    forecast: fmi.Forecast | None
+    weather_stale_after: timedelta
+    stops: dict[str, StopDepartures]  # by stop widget name
+    # Live departures: False while all stops show placeholders.
+    departures_live: bool = False
+    departures_fetched_at: datetime | None = None
+    departures_stale_after: timedelta = timedelta(minutes=5)
+    battery_percent: int | None = None  # from the device's last report, if recent
+    # Departures as clock times (14.32) instead of minutes: when the device
+    # updates only every few minutes, countdowns would go stale.
+    departure_clock: bool = False
+
+    @property
+    def departures_stale(self) -> bool:
+        return self.departures_live and (
+            self.departures_fetched_at is None
+            or self.now - self.departures_fetched_at > self.departures_stale_after
+        )

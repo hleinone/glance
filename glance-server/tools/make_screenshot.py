@@ -52,8 +52,9 @@ def winter_morning() -> render.Scene:
         # (route, headsign, seconds from now, realtime, mode, trunk)
         return [Departure(r, h, now + timedelta(seconds=s), rt, m, tr) for r, h, s, rt, m, tr in rows]
 
-    stops = [
-        StopDepartures("Pasila trams", deps([
+    # By widget name in config.toml's example layout.
+    stops = {
+        "trams": StopDepartures("Pasila trams", deps([
             ("9", "Länsisatama", 25, True, "tram", False),
             ("7", "Meilahden sairaala", 95, True, "tram", False),
             ("2", "Olympiaterm.", 200, True, "tram", False),
@@ -63,7 +64,7 @@ def winter_morning() -> render.Scene:
             ("2", "Messukeskus", 610, False, "tram", False),
             ("13", "Länsi-Pasila", 700, False, "tram", False),
         ]), ("tram",)),
-        StopDepartures("Pasila buses", deps([
+        "buses": StopDepartures("Pasila buses", deps([
             ("500", "Itäkeskus(M)", 80, True, "bus", True),
             ("59", "Herttoniemi(M)", 150, True, "bus", False),
             ("510", "Kivenlahti", 260, True, "bus", True),
@@ -73,7 +74,7 @@ def winter_morning() -> render.Scene:
             ("510", "Herttoniemi(M)", 640, False, "bus", True),
             ("59", "Malminkartano", 790, False, "bus", False),
         ]), ("bus",)),
-        StopDepartures("Pasila trains", deps([
+        "trains": StopDepartures("Pasila trains", deps([
             ("I", "Tikkurila-Lentoasema", 70, True, "rail", False),
             ("K", "Kerava", 230, True, "rail", False),
             ("P", "Lentoasema", 400, True, "rail", False),
@@ -83,7 +84,7 @@ def winter_morning() -> render.Scene:
             ("P", "Lentoasema", 1000, False, "rail", False),
             ("R", "Riihimäki", 1180, False, "rail", False),
         ]), ("rail",)),
-    ]
+    }
     return render.Scene(
         now=now,
         language="en",
@@ -97,7 +98,8 @@ def winter_morning() -> render.Scene:
 
 
 def main() -> None:
-    cfg = replace(config.load(), language="en")
+    # config.toml alone: its example layout, not the local one.
+    cfg = replace(config.load(local_overrides=False), language="en")
     img = render.render(cfg, winter_morning())
     OUT.parent.mkdir(exist_ok=True)
     img.save(OUT, optimize=True)

@@ -21,7 +21,9 @@ ExecStartPre=-/usr/bin/timeout 120 sh -c 'until [ "$(timedatectl show -p NTPSync
 TimeoutStartSec=150
 ExecStart=@DIR@/.venv/bin/python -m glance serve
 Environment=PYTHONUNBUFFERED=1
-Restart=on-failure
+# always, not on-failure: the server never exits on purpose, so any exit
+# (a clean one too) should bring it back. `systemctl --user stop` still stops it.
+Restart=always
 RestartSec=10
 
 # Sandbox. The server answers anyone on the home network and runs as a login
@@ -44,6 +46,13 @@ RestrictNamespaces=yes
 RestrictSUIDSGID=yes
 RestrictRealtime=yes
 LockPersonality=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+# Files it creates (the cache, the battery log) are the owner's only.
+UMask=0077
+# Not ProtectProc=invisible: in a user unit it is accepted but hides nothing
+# (tried: every process stayed visible in /proc).
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK

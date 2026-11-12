@@ -24,8 +24,15 @@ port = 8080
 # page elsewhere can't read the dashboard through a browser at home (DNS
 # rebinding). If your network gives the server another name, list it here:
 # hostnames = ["glance.home.example"]
+#
+# Requests must also come from a home network address (private, link-local or
+# this machine itself), so a port forwarded on the router by mistake exposes
+# nothing. If you reach the server from another range (a VPN's, say), list it:
+# allowed_networks = ["100.64.0.0/10"]
 
-[weather]
+[fmi]
+# Weather from the Finnish Meteorological Institute (no key needed), for
+# [location].
 refresh_minutes = 15
 # Show a "weather is old" warning in the status bar after this many minutes
 # without a successful fetch.
@@ -42,35 +49,10 @@ stale_after_minutes = 5
 
 [device]
 # Each image response tells the device how long to sleep (X-Glance-Sleep
-# header, seconds). It wakes on the minutes of the schedule below (multiples
+# header, seconds). It wakes on the minutes of the [schedule] below (multiples
 # of the interval since midnight, e.g. :00 :05 :10 for 5), arriving this many
 # seconds after the minute changes so the clock on screen is right.
 wake_offset_seconds = 2
-# Interval (minutes) when no schedule rule matches.
-wake_interval_minutes = 5
-
-# Wake schedule: the first matching rule wins. days: "weekdays", "weekend",
-# "all" or a list like ["mon", "fri"], of the moment itself (00:00-06:00 on a
-# Saturday counts as Saturday). "to" is exclusive; a rule may run past
-# midnight (from 23:00 to 06:00). With an interval over 1 minute, departures
-# show clock times (14.32) instead of minutes, since countdowns would go stale.
-
-# An example; put your own schedule in config.local.toml (a [[device.schedule]]
-# list there replaces this one entirely).
-
-[[device.schedule]]  # weekday mornings: every minute
-days = "weekdays"
-from = "07:00"
-to = "09:00"
-every = 1
-
-[[device.schedule]]  # nights: every 15 minutes
-days = "all"
-from = "23:00"
-to = "06:00"
-every = 15
-
-# Otherwise every wake_interval_minutes (5).
 
 [battery]
 # What the device reads (mV) for a full battery. The percentage uses a generic
@@ -82,28 +64,104 @@ full_mv = 4200
 [cache]
 dir = "cache"
 
-# Stop widgets, left to right (up to three).
-#   name   = optional display name; defaults to HSL's name for the stop. Set it
-#            when two widgets would share a name (e.g. trams and buses at
-#            the same station) or HSL's name is too long.
-#   codes  = stop codes as on the stop sign, e.g. ["H0665"]; list several
-#            (e.g. both platforms) to merge them into one widget. Look them
-#            up with:  python -m glance stops "Pasila"
-#            (Digitransit ids like "HSL:1174411" also work, as `ids`.)
-#   routes = optional filter, e.g. ["7", "9"]; omit for all routes
-# A stop without codes (or with no key configured) shows placeholder departures.
+# --- Screens, decks and schedule ------------------------------------------
+#
+# A screen is a grid picture of widget names: words per line give the columns,
+# lines give the rows, and each name must fill a rectangle ("." leaves a cell
+# empty). Every name needs a [widgets.<name>] section saying what it shows.
+#
+# A deck is an ordered list of screens; the device's white buttons move
+# through the deck that's showing. The schedule picks the deck and how often
+# the device wakes. The screen picked stays until the schedule switches to
+# another deck, which starts at its `start` screen (default: its first).
+# Without any [decks], all screens form one deck.
+#
+# Put your own setup in config.local.toml: if it has any of [widgets],
+# [screens], [decks] or [schedule], all four come from there and none of these
+# examples are used.
 
-# Example stops at Pasila. Put your own in config.local.toml: a [[stops]]
-# list there replaces this one entirely.
+[screens.home]
+grid = """
+weather weather hours  hours  hours  hours
+trams   trams   buses  buses  trains trains
+trams   trams   buses  buses  trains trains
+"""
 
-[[stops]]
+[screens.departures]
+grid = """
+hours hours hours hours hours hours
+trams trams trams buses buses buses
+trams trams trams buses buses buses
+"""
+
+[decks.day]
+screens = ["home", "departures"]
+
+[decks.night]
+screens = ["home"]
+
+# The first matching rule wins. days: "weekdays", "weekend", "all", one day
+# ("sat") or a list like ["mon", "fri"], of the moment itself (00:00-06:00 on a Saturday counts
+# as Saturday). "to" is exclusive; a rule may run past midnight (from 23:00 to
+# 06:00). A rule without `every` wakes every wake_interval_minutes; without
+# `deck`, it shows default_deck. With an interval over 1 minute, departures
+# show clock times (14.32) instead of minutes, since countdowns would go stale.
+
+[schedule]
+default_deck = "day"
+wake_interval_minutes = 5    # when no rule matches
+
+[[schedule.rules]]  # weekday mornings: every minute
+days = "weekdays"
+from = "07:00"
+to = "09:00"
+every = 1
+
+[[schedule.rules]]  # nights: every 15 minutes, the home screen only
+days = "all"
+from = "23:00"
+to = "06:00"
+every = 15
+deck = "night"
+
+# The grid area below the status bar is 800×450 px. Widgets fill their area
+# (more hours or departures in a bigger one), down to a minimum size each; a
+# smaller area stops the server at startup, saying how many columns or rows
+# the widget needs in your grid.
+#
+# Widget types (minimum size):
+#
+#   fmi_weather_now     current weather, today's high/low, feels like, wind (245×140)
+#   fmi_weather_hourly  hour-by-hour forecast, as many hours as fit (139×130: 3 hours)
+#   hsl_stops           departures from HSL stops, as many as fit (200×72: one)
+#                       (needs a [digitransit] key)
+#     name   = optional display name; defaults to HSL's name for the stop. Set
+#              it when two widgets would share a name (e.g. trams and buses at
+#              the same station) or HSL's name is too long.
+#     codes  = stop codes as on the stop sign, e.g. ["H0665"]; list several
+#              (e.g. both platforms) to merge them into one widget. Look them
+#              up with:  python -m glance stops "Pasila"
+#              (Digitransit ids like "HSL:1174411" also work, as `ids`.)
+#     routes = optional filter, e.g. ["7", "9"]; omit for all routes
+#     Without codes (or with no key configured) it shows placeholder departures.
+
+[widgets.weather]
+type = "fmi_weather_now"
+
+[widgets.hours]
+type = "fmi_weather_hourly"
+
+[widgets.trams]
+type = "hsl_stops"
 name = "Pasilan asema, ratikat"
 codes = ["H0665", "H0664"]
 
-[[stops]]
+[widgets.buses]
+type = "hsl_stops"
 name = "Pasilan asema, bussit"
 codes = ["H2100", "H2101"]
 
-[[stops]]
+[widgets.trains]
+type = "hsl_stops"
 name = "Pasila, junat"
 codes = ["H0086"]

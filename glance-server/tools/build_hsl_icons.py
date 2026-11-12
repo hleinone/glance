@@ -24,7 +24,9 @@ import svg_render
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "icons" / "hsl"
 SRC = OUT / "src"
-REPO = "https://raw.githubusercontent.com/HSLdevcom/digitransit-ui/v3"
+# Pinned to a commit, not the moving v3 branch: a missing source is fetched
+# again as the file the committed ones came from (checked identical 2026-11-13).
+REPO = "https://raw.githubusercontent.com/HSLdevcom/digitransit-ui/3f151f9dce37ede2a3bc1df45865b82f398ffcf4"
 # Our mode name (Digitransit's vehicleMode, lower-cased) -> HSL's icon file.
 MODES = {"tram": "icon_tram", "bus": "icon_bus", "subway": "icon_subway", "rail": "icon_rail", "ferry": "icon_ferry"}
 SIZES = [28]

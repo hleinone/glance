@@ -7,18 +7,34 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from glance import battery, config, departures, fmi, hsl, i18n, icons, render, schedule
+from glance import battery, config, decks, departures, draw, fmi, hsl, i18n, icons, layout, render, schedule, widgets
+from glance.widgets import fmi_weather_hourly, hsl_stops
 
 DATA = Path(__file__).parent / "data"
 HELSINKI = ZoneInfo("Europe/Helsinki")
 
 
-def isolated_config(test: unittest.TestCase, **changes) -> config.Config:
+def isolated_config(test: unittest.TestCase, stops: list[widgets.HslStops] | None = None, **changes) -> config.Config:
     """config.toml alone (no config.local.toml, no environment), no key, and a
     cache folder of the test's own: tests must not depend on this machine's
-    settings, reach the network or touch the real cache."""
+    settings, reach the network or touch the real cache.
+
+    stops: one screen of just these stop widgets, side by side (s0, s1, ...)."""
     cache = Path(test.enterContext(tempfile.TemporaryDirectory()))
-    return replace(config.load(local_overrides=False), **{"digitransit_key": None, "cache_dir": cache, **changes})
+    cfg = config.load(local_overrides=False)
+    if stops is not None:
+        names = [f"s{i}" for i in range(len(stops))]
+        changes["widgets"] = dict(zip(names, stops))
+        changes["screens"] = {"main": layout.parse(" ".join(names) or ".")}
+        changes["decks"] = {"all": decks.Deck("all", ("main",), "main")}
+        # The example's wake times, without its decks.
+        changes["wake_schedule"] = schedule.WakeSchedule(
+            tuple(replace(r, deck=None) for r in cfg.wake_schedule.rules), cfg.wake_schedule.default_every, "all")
+    return replace(cfg, **{"digitransit_key": None, "cache_dir": cache, **changes})
+
+
+# The least a config file needs: a location and a screen.
+MINIMAL = '[location]\nlat = 60.2\nlon = 24.9\n[screens.main]\ngrid = "."\n'
 
 
 class FMITest(unittest.TestCase):
@@ -59,6 +75,20 @@ class FMITest(unittest.TestCase):
             }))
             hour = fmi.load_cache(path).hours[0]
         self.assertEqual((hour.temperature, hour.wind_speed, hour.wind_direction, hour.symbol), (None, None, 180.0, 3))
+
+    def test_values_that_could_not_be_drawn(self):
+        def element(time, name, value):
+            return (f"<wfs:member><BsWfs:BsWfsElement><BsWfs:Time>{time}</BsWfs:Time>"
+                    f"<BsWfs:ParameterName>{name}</BsWfs:ParameterName>"
+                    f"<BsWfs:ParameterValue>{value}</BsWfs:ParameterValue></BsWfs:BsWfsElement></wfs:member>")
+        hours = fmi.parse((
+            '<wfs:FeatureCollection xmlns:wfs="http://www.opengis.net/wfs/2.0" xmlns:BsWfs="http://xml.fmi.fi/schema/wfs/2.0">'
+            + element("2026-11-09T12:00:00", "WeatherSymbol3", "1e300")   # no zone; an absurd code
+            + element("2026-11-09T13:00:00+02:00", "WeatherSymbol3", "2.0")
+            + element("9999-12-31T23:00:00Z", "Temperature", "1")          # can't be shown in local time
+            + "</wfs:FeatureCollection>").encode())
+        self.assertEqual([h.time for h in hours], [datetime(2026, 11, 9, 11, tzinfo=UTC), datetime(2026, 11, 9, 12, tzinfo=UTC)])
+        self.assertEqual([h.symbol for h in hours], [2, None])
 
     def test_feels_like(self):
         xml = b"""<wfs:FeatureCollection xmlns:wfs="http://www.opengis.net/wfs/2.0"
@@ -102,7 +132,7 @@ class FMITest(unittest.TestCase):
             http.client.IncompleteRead(b"<wfs"),
             TimeoutError("timed out"),
         ):
-            with mock.patch("urllib.request.urlopen", side_effect=failure):
+            with mock.patch("glance.upstream._open", side_effect=failure):
                 with self.assertRaises(fmi.FMIError):
                     fmi.fetch(60.2, 24.9, HELSINKI)
 
@@ -125,7 +155,7 @@ class FMITest(unittest.TestCase):
         self.assertIsNone(icons.fmi_symbol(None, 76))
         self.assertIsNone(icons.fmi_symbol(999, 76))
         # Without a pre-rendered PNG, the hand-drawn icon is used.
-        self.assertEqual(render.weather_icon(999, "rain", 2, 50).size, (50, 50))
+        self.assertEqual(draw.weather_icon(999, "rain", 2, 50).size, (50, 50))
         self.assertTrue((icons.FMI_DIR / "LICENSE").exists())
 
     def test_symbols(self):
@@ -144,15 +174,15 @@ class FMITest(unittest.TestCase):
 
 class FormatTest(unittest.TestCase):
     def test_temperature_uses_real_minus(self):
-        self.assertEqual(render.fmt_temp(-3.2), "−3°")
-        self.assertEqual(render.fmt_temp(-0.4), "0°")
-        self.assertEqual(render.fmt_temp(4.5), "5°")
-        self.assertEqual(render.fmt_temp(None), "–")
+        self.assertEqual(draw.fmt_temp(-3.2), "−3°")
+        self.assertEqual(draw.fmt_temp(-0.4), "0°")
+        self.assertEqual(draw.fmt_temp(4.5), "5°")
+        self.assertEqual(draw.fmt_temp(None), "–")
 
     def test_fit_text_shrinks_then_truncates(self):
-        f, text = render.fit_text("Short", "medium", 16, 12, 200)
+        f, text = draw.fit_text("Short", "medium", 16, 12, 200)
         self.assertEqual((f.size, text), (16, "Short"))
-        f, text = render.fit_text("Westendinasema via Otaniemi ja Keilaniemi", "medium", 16, 12, 120)
+        f, text = draw.fit_text("Westendinasema via Otaniemi ja Keilaniemi", "medium", 16, 12, 120)
         self.assertEqual(f.size, 12)
         self.assertTrue(text.endswith("…"))
         self.assertLessEqual(f.getlength(text), 120)
@@ -228,7 +258,7 @@ class HSLTest(unittest.TestCase):
         query = [hsl.StopQuery(("HSL:1",))]
 
         def answer(payload):
-            return mock.patch("urllib.request.urlopen", return_value=io.BytesIO(json.dumps(payload).encode()))
+            return mock.patch("glance.upstream._open", return_value=io.BytesIO(json.dumps(payload).encode()))
 
         for payload in (
             [],                                                     # not an object
@@ -240,13 +270,39 @@ class HSLTest(unittest.TestCase):
         ):
             with answer(payload), self.assertRaises(hsl.HSLError, msg=payload):
                 hsl.fetch(query, "key", "fi")
-        with mock.patch("urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"{")):
+        with mock.patch("glance.upstream._open", side_effect=http.client.IncompleteRead(b"{")):
             with self.assertRaises(hsl.HSLError):
                 hsl.fetch(query, "key", "fi")
 
     def test_mode_icon_names_are_limited(self):
         self.assertIsNone(icons.mode_icon("../fmi/36/1"))
         self.assertIsNone(icons.mode_icon("airplane"))
+
+    def test_one_route_is_not_its_characters(self):
+        self.assertEqual(hsl_stops.parse({"routes": "550"}).routes, frozenset({"550"}))
+        self.assertEqual(hsl_stops.parse({"routes": 550}).routes, frozenset({"550"}))
+        self.assertEqual(hsl_stops.parse({"routes": ["7", 9]}).routes, frozenset({"7", "9"}))
+
+    def test_absurdly_long_text_is_cut(self):
+        long = "x" * 5000
+        data = {"stops": [{"gtfsId": "HSL:1", "name": long, "stoptimesWithoutPatterns": [
+            _stoptime(self.DAY, 3600, long, long)]}]}
+        dep = hsl.parse_departures(data)["HSL:1"][0]
+        self.assertEqual((len(dep.route), len(dep.headsign)), (hsl.MAX_TEXT, hsl.MAX_TEXT))
+        self.assertEqual(len(hsl.parse_stop_names(data)["HSL:1"]), hsl.MAX_TEXT)
+
+    def test_values_that_could_not_be_drawn(self):
+        far = _stoptime(253402214400, 86399, "7", "Pasila")  # 9999-12-31 23:59:59 UTC
+        data = {"stops": [{"gtfsId": "HSL:1", "name": "Stop", "stoptimesWithoutPatterns": [
+            far, _stoptime(self.DAY, 3600, "7", "Pasila")]}]}
+        self.assertEqual(len(hsl.parse_departures(data)["HSL:1"]), 1)  # the one a clock can show
+        for bad in ({"name": ["a", "b"]}, {"vehicleMode": 7}):
+            with self.assertRaises(TypeError, msg=bad):
+                (hsl.parse_stop_names if "name" in bad else hsl.parse_stop_modes)({"stops": [{"gtfsId": "HSL:1", **bad}]})
+        number = _stoptime(self.DAY, 3600, "7", "Pasila")
+        number["trip"]["route"]["shortName"] = 7
+        with self.assertRaises(TypeError):
+            hsl.parse_departures({"stops": [{"gtfsId": "HSL:1", "stoptimesWithoutPatterns": [number]}]})
 
     def test_short_headsign(self):
         self.assertEqual(hsl.short_headsign("Herttoniemi(M) via Kalasatama(M)"), "Herttoniemi(M)")
@@ -311,18 +367,32 @@ class HSLTest(unittest.TestCase):
 [location]
 lat = 60.2
 lon = 24.9
-[[stops]]
+[screens.main]
+grid = """
+now  now   now   now
+one  two   three four
+"""
+[widgets.now]
+type = "fmi_weather_now"
+[widgets.one]
+type = "hsl_stops"
 name = "One"
 id = "HSL:1"
 routes = [7, "9"]
-[[stops]]
+[widgets.two]
+type = "hsl_stops"
 name = "Two"
 ids = ["HSL:2", "HSL:3"]
-[[stops]]
+[widgets.three]
+type = "hsl_stops"
 name = "Three"
 codes = ["H0665", "H0664"]
-[[stops]]
+[widgets.four]
+type = "hsl_stops"
 codes = "H0664"
+[widgets.unused]
+type = "hsl_stops"
+codes = "H0001"
 ''')
             (Path(d) / "config.local.toml").write_text('[digitransit]\nkey = "secret"\n')
             from unittest import mock
@@ -333,10 +403,12 @@ codes = "H0664"
                 self.assertEqual(config.load(path).digitransit_key, "from-env")
                 self.assertEqual(config.load(path, local_overrides=False).digitransit_key, None)
         self.assertEqual(cfg.digitransit_key, "secret")
-        self.assertEqual(cfg.stops[0], config.Stop("One", ("HSL:1",), frozenset({"7", "9"})))
-        self.assertEqual(cfg.stops[1].ids, ("HSL:2", "HSL:3"))
-        self.assertEqual(cfg.stops[2].ids, ("H0665", "H0664"))
-        self.assertEqual(cfg.stops[3], config.Stop("", ("H0664",)))
+        self.assertEqual(list(cfg.stops), ["one", "two", "three", "four"])  # layout order; unused left out
+        self.assertEqual(cfg.stops["one"], widgets.HslStops("One", ("HSL:1",), frozenset({"7", "9"})))
+        self.assertEqual(cfg.stops["two"].ids, ("HSL:2", "HSL:3"))
+        self.assertEqual(cfg.stops["three"].ids, ("H0665", "H0664"))
+        self.assertEqual(cfg.stops["four"], widgets.HslStops("", ("H0664",)))
+        self.assertEqual(cfg.widgets["now"], widgets.FmiWeatherNow())
 
     def test_stop_code_from_geocoding(self):
         # Shape of a real geocoding response for a stop code: the HSL feed's stop
@@ -356,6 +428,275 @@ codes = "H0664"
         self.assertFalse(hsl.is_gtfs_id("H0665"))
 
 
+class UpstreamTest(unittest.TestCase):
+    """The limits on reading a provider's answer, against a server of our own."""
+
+    def setUp(self):
+        import threading, time
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        test = self
+        test.seen = []
+
+        class Provider(BaseHTTPRequestHandler):
+            def do_GET(self):
+                test.seen.append((self.path, self.headers.get("digitransit-subscription-key")))
+                if self.path == "/redirect":
+                    self.send_response(302)
+                    self.send_header("Location", "/ok")
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.send_header("Content-Length", "3000")
+                self.end_headers()
+                try:
+                    if self.path == "/ok":
+                        self.wfile.write(b"x" * 3000)
+                    elif self.path == "/cut-short":
+                        self.wfile.write(b"x" * 10)
+                    elif self.path == "/dripping":  # a byte at a time, each within any per-read timeout
+                        for _ in range(3000):
+                            self.wfile.write(b"x")
+                            time.sleep(0.02)
+                except OSError:
+                    pass  # the client gave up, as it should
+
+            def log_message(self, *a):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+
+    def read(self, path, **limits):
+        import urllib.request
+        from unittest import mock
+        from glance import upstream
+        # As upstream's own opener, but never through a proxy from this
+        # machine's environment (http_proxy), which can't reach this server.
+        direct = urllib.request.build_opener(upstream._NoRedirects, urllib.request.ProxyHandler({}))
+        self.enterContext(mock.patch.object(upstream, "_opener", direct))
+        req = urllib.request.Request(f"http://127.0.0.1:{self.server.server_address[1]}{path}",
+                                     headers={"digitransit-subscription-key": "secret"})
+        return upstream.read(req, **{"timeout": 2, "deadline": 5, **limits})
+
+    def test_reads_the_answer(self):
+        self.assertEqual(self.read("/ok"), b"x" * 3000)
+
+    def test_too_large(self):
+        with self.assertRaisesRegex(OSError, "larger"):
+            self.read("/ok", max_bytes=1000)
+
+    def test_too_slow(self):
+        import time
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            self.read("/dripping", deadline=0.3)
+        self.assertLess(time.monotonic() - started, 2)  # not the minute the whole answer would take
+
+    def test_cut_short(self):
+        import http.client
+        with self.assertRaises(http.client.IncompleteRead):
+            self.read("/cut-short")
+
+    def test_redirect_is_refused(self):
+        # urllib would follow it and send the key along.
+        import urllib.error
+        with self.assertRaises(urllib.error.HTTPError) as refused:
+            self.read("/redirect")
+        self.assertEqual(refused.exception.code, 302)
+        self.assertEqual(self.seen, [("/redirect", "secret")])
+
+
+class LayoutTest(unittest.TestCase):
+    def test_grid(self):
+        lay = layout.parse("""
+            weather weather hours hours hours hours
+            trams   trams   buses buses .     .
+            trams   trams   buses buses small .
+        """)
+        self.assertEqual((lay.cols, lay.rows), (6, 3))
+        self.assertEqual(lay.names, ("weather", "hours", "trams", "buses", "small"))  # reading order
+        self.assertEqual(lay.areas[2], layout.Area("trams", 0, 1, 2, 2))
+        self.assertEqual(lay.areas[4], layout.Area("small", 4, 2, 1, 1))
+
+    def test_bad_grids(self):
+        for grid, message in (
+            ("", "empty"),
+            ("a a\nb", "line 2 has 1 cells"),
+            ("a a\na b", "'a' doesn't fill a rectangle"),  # L shape
+            ("a b a", "'a' doesn't fill a rectangle"),  # in two places
+        ):
+            with self.assertRaisesRegex(ValueError, message):
+                layout.parse(grid)
+
+    def test_area_pixels(self):
+        lay = layout.parse("a a b b b b\nc c d d e e\nc c d d e e")
+        rects = [lay.rect(a) for a in lay.areas]
+        # The fixed 6x3 grid's cells before layouts were configurable.
+        self.assertEqual(rects[:3], [(0, 30, 267, 180), (267, 30, 800, 180), (0, 180, 267, 480)])
+        halves = layout.parse("a\nb\nb\nb\nb\nc")  # 6 rows: half a 3-row grid's row each
+        self.assertEqual([halves.rect(a)[1::2] for a in halves.areas], [(30, 105), (105, 405), (405, 480)])
+
+    def test_bad_widget_config(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            base = "[location]\nlat = 60.2\nlon = 24.9\n"
+            for bad, message in (
+                ("", "no screens"),
+                ('[screens.s]\n', "'s': .* needs a grid"),
+                ('[screens.s]\ngrid = "a"\n', "screen 's': .*no \\[widgets.a\\]"),
+                ('[screens.s]\ngrid = "a"\n[widgets.a]\ntype = "clock"\n', "type must be one of"),
+                ('[screens.s]\ngrid = "a"\n[widgets.a]\ntype = "hsl_stops"\ncodez = ["H0665"]\n', "unknown setting.*codez"),
+                ('[screens.s]\ngrid = "."\nwidth = 3\n', "screen 's': unknown setting.*width"),
+                ('[screens.s]\ngrid = "."\n[[stops]]\ncodes = ["H0665"]\n', "stops.*no longer used"),
+                ('[screens.s]\ngrid = "."\n[weather]\nrefresh_minutes = 15\n', "weather.*no longer used"),
+                ('[layout]\ngrid = "."\n', "layout.*no longer used.*screens"),
+                ('[screens.s]\ngrid = "."\n[[device.schedule]]\nfrom = "07:00"\nto = "09:00"\n', "device.schedule.*no longer used"),
+                ('[screens.s]\ngrid = "."\n[device]\nwake_interval_minutes = 5\n', "wake_interval_minutes is no longer used"),
+                # Decks and the schedule refer to what exists.
+                ('[screens.s]\ngrid = "."\n[decks.d]\nscreens = ["s", "t"]\n', "deck 'd': there is no \\[screens.t\\]"),
+                ('[screens.s]\ngrid = "."\n[decks.d]\nscreens = []\n', "deck 'd': screens = .* is missing"),
+                ('[screens.s]\ngrid = "."\n[decks.d]\nscreens = ["s", "s"]\n', "listed twice"),
+                ('[screens.s]\ngrid = "."\n[screens.t]\ngrid = "."\n[decks.d]\nscreens = ["s"]\nstart = "t"\n', "start = 't' is not one of"),
+                ('[screens.s]\ngrid = "."\n[schedule]\ndefault_deck = "night"\n', "default_deck: there is no \\[decks.night\\]"),
+                ('[screens.s]\ngrid = "."\n[[schedule.rules]]\nfrom = "07:00"\nto = "09:00"\ndeck = "x"\n', "rule 1: there is no \\[decks.x\\]"),
+                ('[screens.s]\ngrid = "."\n[[schedule.rules]]\nfrom = "07:00"\n', "rule 1: to = .* is missing"),
+                ('[screens.s]\ngrid = "."\n[[schedule.rules]]\nfrom = "07:00"\nto = "09:00"\ndeck_name = "x"\n', "rule 1: unknown setting.*deck_name"),
+            ):
+                path.write_text(base + bad)
+                with self.assertRaisesRegex(ValueError, message):
+                    config.load(path)
+
+    def test_local_setup_replaces_the_examples(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            path.write_text('[location]\nlat = 60.2\nlon = 24.9\n[screens.home]\ngrid = "trams buses"\n'
+                            '[widgets.trams]\ntype = "hsl_stops"\nname = "Example"\ncodes = ["H0665"]\n'
+                            '[widgets.buses]\ntype = "hsl_stops"\ncodes = ["H2100"]\n'
+                            '[decks.night]\nscreens = ["home"]\n'
+                            '[schedule]\nwake_interval_minutes = 5\n'
+                            '[[schedule.rules]]\nfrom = "23:00"\nto = "06:00"\nevery = 15\ndeck = "night"\n')
+            local = Path(d) / "config.local.toml"
+            local.write_text('[screens.mine]\ngrid = "trams"\n[widgets.trams]\ntype = "hsl_stops"\ncodes = ["H0086"]\n')
+            cfg = config.load(path)
+            self.assertEqual(cfg.stops, {"trams": widgets.HslStops("", ("H0086",))})  # no example name leaked
+            self.assertEqual(list(cfg.screens), ["mine"])
+            self.assertEqual(cfg.decks, {"all": decks.Deck("all", ("mine",), "mine")})  # no example deck
+            # No example rule pointing at an example deck, nor its intervals.
+            self.assertEqual(cfg.wake_schedule, schedule.WakeSchedule((), 1, "all"))
+            local.write_text('[widgets.trams]\ntype = "hsl_stops"\ncodes = ["H0086"]\n')
+            with self.assertRaisesRegex(ValueError, "no screens"):  # only widgets: the screens must come too
+                config.load(path)
+            local.write_text('[digitransit]\nkey = "k"\n')  # nothing of the setup: the examples stay
+            self.assertEqual(list(config.load(path, local_overrides=True).screens), ["home"])
+
+
+class WidgetSizeTest(unittest.TestCase):
+    """Widgets fill their rectangle and stay inside it, down to their minimum size."""
+
+    NOW = datetime(2027, 1, 19, 8, 12, 4, tzinfo=HELSINKI)
+
+    def worst_case(self, language: str, clock: bool) -> render.Scene:
+        """Data that takes the most room: long texts, wide temperatures, three modes."""
+        now = self.NOW
+        symbol = max((s for s in range(1, 100) if fmi.symbol_info(s, language)[2]),
+                     key=lambda s: len(fmi.symbol_info(s, language)[2]))
+        start = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=8)
+        hours = [fmi.Hour(time=(start + timedelta(hours=i)).astimezone(UTC), temperature=-20.4 - (i % 2) * 8.2,
+                          wind_speed=15.4, wind_direction=45.0, pop=100, symbol=symbol, feels_like=-35.4)
+                 for i in range(48)]
+        rows = [
+            ("N550K", "Westendinasema via Otaniemi ja Keilaniemi", 0, True, "bus", True),  # "now"
+            ("10", "Kirurginen sairaala, Kaivopuisto", 59 * 60, True, "tram", False),  # "59 min"
+            ("I", "Tikkurila-Lentoasema-Huopalahti", 23 * 60, False, "rail", False),
+        ] * 8
+        deps = sorted((departures.Departure(r, h, now + timedelta(seconds=t), rt, m, tr) for r, h, t, rt, m, tr in rows),
+                      key=lambda d: d.time)
+        stop = departures.StopDepartures("Itäkeskus(M) Kauppakeskus Itis, laituri 12", deps, ("subway", "rail", "tram"))
+        return render.Scene(now=now, language=language, forecast=fmi.Forecast(now, hours),
+                            weather_stale_after=timedelta(minutes=45), stops={"w": stop}, departure_clock=clock)
+
+    def drawn_outside(self, widget, size: tuple[int, int], sc: render.Scene) -> tuple | None:
+        """Bounding box of anything drawn outside the rectangle, or None."""
+        from PIL import Image, ImageChops, ImageDraw
+        img = Image.new("L", (1000, 700), 255)
+        rect = (100, 100, 100 + size[0], 100 + size[1])
+        widgets.module(widget).draw(img, ImageDraw.Draw(img), sc, rect, "w", widget)
+        img = draw.quantise(img)
+        ImageDraw.Draw(img).rectangle((rect[0], rect[1], rect[2] - 1, rect[3] - 1), fill=255)
+        return ImageChops.invert(img).getbbox()
+
+    def test_stays_inside(self):
+        for widget in (widgets.FmiWeatherNow(), widgets.FmiWeatherHourly(), widgets.HslStops()):
+            min_w, min_h = widget.MIN_SIZE
+            # The minimum, today's sizes, and long thin shapes either way.
+            for size in ((min_w, min_h), (267, 150), (533, 150), (267, 300), (800, min_h), (min_w, 450)):
+                for language in ("en", "fi"):
+                    for clock in (False, True):
+                        sc = self.worst_case(language, clock)
+                        for case in (sc, replace(sc, forecast=None, stops={"w": departures.StopDepartures("—", [])})):
+                            with self.subTest(widget=type(widget).__name__, size=size, language=language, clock=clock):
+                                self.assertIsNone(self.drawn_outside(widget, size, case))
+
+    def test_fill(self):
+        self.assertEqual(fmi_weather_hourly.hours_fitting(533), 12)  # 4 of 6 columns: as before layouts were configurable
+        self.assertEqual(fmi_weather_hourly.hours_fitting(267), 6)
+        self.assertEqual(fmi_weather_hourly.hours_fitting(widgets.FmiWeatherHourly.MIN_SIZE[0]), 3)
+        self.assertEqual(hsl_stops.departures_fitting(300), 8)  # 2 of 3 rows: as before
+        self.assertEqual(hsl_stops.departures_fitting(450), 12)
+        self.assertEqual(hsl_stops.departures_fitting(widgets.HslStops.MIN_SIZE[1]), 1)
+
+    def test_too_small_fails_at_load(self):
+        sections = {"w": {"type": "fmi_weather_now"}, "h": {"type": "fmi_weather_hourly"},
+                    "s": {"type": "hsl_stops"}, "x": {"type": "hsl_stops"}}
+
+        def load(grid):
+            return config._setup({"screens": {"s": {"grid": grid}}, "widgets": sections})
+
+        load("w w w h h h h\ns s s s s s s")  # 3 of 7 columns: 343 px, enough
+        for grid, message in (
+            ("w h h h h h h\ns s s s s s s",
+             r"'w' \(fmi_weather_now\) needs at least 245×140 px; in this 7×2 grid it gets 114×225: give it 3 columns"),
+            ("s\n" * 7 + "x", r"'x' \(hsl_stops\) .* 1×8 grid it gets 800×56: give it 2 rows"),
+            (".\n" * 8 + "x", r"'x' .* 1×9 grid it gets 800×50: give it 2 rows"),
+            ("h" + " ." * 11 + "\n" + (". " * 12 + "\n") * 5,
+             r"'h' .* 12×6 grid it gets 67×75: give it 3 columns and 2 rows"),
+        ):
+            with self.subTest(grid=grid), self.assertRaisesRegex(ValueError, message):
+                load(grid)
+
+
+class DeckTest(unittest.TestCase):
+    DAY = decks.Deck("day", ("home", "trains", "weather"), "trains")
+    NIGHT = decks.Deck("night", ("home",), "home")
+
+    def test_neighbours(self):
+        self.assertEqual(self.DAY.neighbours("trains"), ("home", "weather"))
+        self.assertEqual(self.DAY.neighbours("home"), ("weather", "trains"))  # wrapping around
+        self.assertEqual(decks.Deck("d", ("a", "b"), "a").neighbours("a"), ("b",))  # once, not twice
+        self.assertEqual(self.NIGHT.neighbours("home"), ())
+
+    def test_selection(self):
+        sel = decks.Selection()
+        self.assertEqual(sel.current(self.DAY), ("trains", 1))  # starts at the deck's start
+        self.assertTrue(sel.step(self.DAY, 1))
+        self.assertEqual(sel.current(self.DAY), ("weather", 2))
+        self.assertTrue(sel.step(self.DAY, 1))
+        self.assertEqual(sel.current(self.DAY), ("home", 0))  # wraps around
+        self.assertTrue(sel.step(self.DAY, -1))
+        self.assertEqual(sel.current(self.DAY), ("weather", 2))  # and back
+        self.assertEqual(sel.current(self.DAY), ("weather", 2))  # stays across wakes
+        # Drawing ahead for a minute in another deck doesn't switch to it.
+        self.assertEqual(sel.peek(self.NIGHT), "home")
+        self.assertEqual(sel.peek(self.DAY), "weather")
+        self.assertEqual(sel.current(self.DAY), ("weather", 2))
+        # A real switch does, and coming back starts the deck over.
+        self.assertFalse(sel.step(self.NIGHT, 1))  # one screen: nothing to change
+        self.assertEqual(sel.current(self.NIGHT), ("home", 0))
+        self.assertEqual(sel.current(self.DAY), ("trains", 1))
+
+
 class RenderTest(unittest.TestCase):
     def setUp(self):
         self.cfg = isolated_config(self)
@@ -366,7 +707,7 @@ class RenderTest(unittest.TestCase):
             language="en",
             forecast=fmi.Forecast(self.now - timedelta(minutes=5), hours),
             weather_stale_after=timedelta(minutes=45),
-            stops=[departures.placeholder(n, i, self.now) for i, n in enumerate("ABC")],
+            stops={w: departures.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.stops, "ABC"))},
         )
 
     def assert_panel_image(self, img):
@@ -378,8 +719,27 @@ class RenderTest(unittest.TestCase):
         for lang in ("en", "fi"):
             self.assert_panel_image(render.render(self.cfg, replace(self.scene, language=lang)))
 
+    def test_a_widget_that_fails_costs_only_its_area(self):
+        from unittest import mock
+        scene = self.scene
+        whole = render.render(self.cfg, scene, "home")
+        with mock.patch.object(hsl_stops, "draw", side_effect=RuntimeError("bad data")):
+            with self.assertRaises(RuntimeError):  # on the command line and in tests: a mistake shows
+                render.render(self.cfg, scene, "home")
+            with self.assertLogs("glance", "ERROR") as logs:
+                img = render.render(self.cfg, scene, "home", forgiving=True)  # as the server draws
+        self.assertEqual(len(logs.records), 3)  # the three stop widgets
+        lay = self.cfg.screens["home"]
+        for area in lay.areas:
+            box = lay.rect(area)
+            if isinstance(self.cfg.widgets[area.name], widgets.HslStops):
+                self.assertEqual(img.crop(box).getextrema(), (255, 255), area.name)  # empty
+            else:
+                self.assertEqual(img.crop(box).tobytes(), whole.crop(box).tobytes(), area.name)  # as ever
+        self.assertEqual(img.crop((0, 0, 800, 30)).tobytes(), whole.crop((0, 0, 800, 30)).tobytes())
+
     def test_render_without_data(self):
-        sc = replace(self.scene, forecast=None, stops=[departures.StopDepartures("Empty", [])])
+        sc = replace(self.scene, forecast=None, stops={"trams": departures.StopDepartures("Empty", [])})
         self.assert_panel_image(render.render(self.cfg, sc))
 
     def test_status_text(self):
@@ -391,6 +751,23 @@ class RenderTest(unittest.TestCase):
         self.assertFalse(fresh.departures_stale)
         self.assertEqual(render._status_warning(fresh), None)
         self.assert_panel_image(render.render(self.cfg, live))
+
+    def test_page_dots(self):
+        from PIL import ImageChops
+        plain = render.render(self.cfg, self.scene)
+        one = decks.Deck("night", ("home",), "home")
+        self.assertEqual(render.render(self.cfg, self.scene, "home", one).tobytes(), plain.tobytes())  # a deck of one: none
+        two = decks.Deck("day", ("home", "departures"), "home")
+        dotted = render.render(self.cfg, self.scene, "home", two)
+        box = ImageChops.difference(plain, dotted).getbbox()
+        self.assertIsNotNone(box)
+        self.assertTrue(380 < box[0] and box[2] < 420 and box[3] <= 30, box)  # only in the middle of the status bar
+        second = render.render(self.cfg, self.scene, "departures", two)
+        self.assertNotEqual(second.crop(box).tobytes(), dotted.crop(box).tobytes())  # the other dot filled
+        # A long warning takes the room: no dots then.
+        warned = replace(self.scene, forecast=None, departures_live=True, battery_percent=10)
+        self.assertEqual(render.render(self.cfg, warned, "home", two).tobytes(),
+                         render.render(self.cfg, warned, "home").tobytes())
 
     def test_g2(self):
         from PIL import Image
@@ -406,8 +783,8 @@ class RenderTest(unittest.TestCase):
     def test_departure_clock_times(self):
         stop = departures.placeholder("A", 0, self.now)
         dep = stop.departures[1]  # 3 minutes from now
-        minutes = render._minutes_text(dep, self.scene)
-        clock = render._minutes_text(dep, replace(self.scene, departure_clock=True))
+        minutes = hsl_stops.minutes_text(dep, self.scene)
+        clock = hsl_stops.minutes_text(dep, replace(self.scene, departure_clock=True))
         self.assertEqual(minutes, ("3", "min"))
         self.assertEqual(clock, (i18n.clock("en", dep.time.astimezone(HELSINKI)), ""))
         self.assert_panel_image(render.render(self.cfg, replace(self.scene, departure_clock=True)))
@@ -500,24 +877,52 @@ class ScheduleTest(unittest.TestCase):
     def test_bad_intervals_fail_at_startup(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "config.toml"
-            for device in ("wake_interval_minutes = 0", "wake_interval_minutes = 5\n[[device.schedule]]\n"
-                           'from = "07:00"\nto = "09:00"\nevery = 0'):
-                path.write_text(f"[location]\nlat = 60.2\nlon = 24.9\n[device]\n{device}\n")
+            for sched in ("wake_interval_minutes = 0", "wake_interval_minutes = 5\n[[schedule.rules]]\n"
+                          'from = "07:00"\nto = "09:00"\nevery = 0'):
+                path.write_text(f"{MINIMAL}[schedule]\n{sched}\n")
                 with self.assertRaisesRegex(ValueError, "1..1440"):
                     config.load(path)
             for bad, message in (
                 ("[digitransit]\npoll_lead_seconds = 60", "poll_lead_seconds"),  # the refresher would never wait
                 ("[device]\nwake_offset_seconds = -30", "wake_offset_seconds"),
-                ('[[device.schedule]]\nfrom = "07:99"\nto = "09:00"\nevery = 1', "bad time"),
-                ('[[device.schedule]]\nfrom = "7"\nto = "09:00"\nevery = 1', "bad time"),
+                ('[[schedule.rules]]\nfrom = "07:99"\nto = "09:00"\nevery = 1', "bad time"),
+                ('[[schedule.rules]]\nfrom = "7"\nto = "09:00"\nevery = 1', "bad time"),
             ):
-                path.write_text(f"[location]\nlat = 60.2\nlon = 24.9\n{bad}\n")
+                path.write_text(f"{MINIMAL}{bad}\n")
                 with self.assertRaisesRegex(ValueError, message):
                     config.load(path)
-            path.write_text("[location]\nlat = 60.2\nlon = 24.9\n[[stops]]\ncodes = [1234, \"H0665\"]\n[[stops]]\ncode = 5678\n")
-            self.assertEqual([s.ids for s in config.load(path).stops], [("1234", "H0665"), ("5678",)])  # text, not numbers
-            path.write_text('[location]\nlat = 60.2\nlon = 24.9\n[server]\nhostnames = "Pi.Lan"\n')
+            path.write_text('[location]\nlat = 60.2\nlon = 24.9\n[screens.main]\ngrid = "a b"\n'
+                            '[widgets.a]\ntype = "hsl_stops"\ncodes = [1234, "H0665"]\n'
+                            '[widgets.b]\ntype = "hsl_stops"\ncode = 5678\n')
+            self.assertEqual([s.ids for s in config.load(path).stops.values()], [("1234", "H0665"), ("5678",)])  # text, not numbers
+            path.write_text(f'{MINIMAL}[server]\nhostnames = "Pi.Lan"\n')
             self.assertEqual(config.load(path).hostnames, ("pi.lan",))  # one name, not its letters
+
+    def test_bad_values_fail_at_startup_with_a_reason(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.toml"
+            rule = '[[schedule.rules]]\nfrom = "07:00"\nto = "09:00"\n'
+            for bad, message in (
+                (rule + 'days = "workdays"', "days must be"),
+                (rule + 'days = ["mon", "xyz"]', "days must be"),
+                (rule + "days = 1", "days must be"),
+                ("[server]\nport = 99999", "port"),
+                ("[server]\nport = true", "port"),
+                ('[server]\nallowed_networks = ["vpn"]', "allowed_networks"),
+                ("[fmi]\nrefresh_minutes = 0", "refresh_minutes"),
+                ("[digitransit]\nstale_after_minutes = -1", "stale_after_minutes"),
+                ("[battery]\nfull_mv = 42", "full_mv"),
+            ):
+                path.write_text(f"{MINIMAL}{bad}\n")
+                with self.subTest(bad), self.assertRaisesRegex(ValueError, message):
+                    config.load(path)
+            path.write_text('[location]\nlat = 160.2\nlon = 24.9\n[screens.main]\ngrid = "."\n')
+            with self.assertRaisesRegex(ValueError, "lat"):
+                config.load(path)
+            path.write_text(f'{MINIMAL}{rule}days = "Monday"\n[server]\nallowed_networks = "100.64.0.1/10"\n')
+            cfg = config.load(path)
+            self.assertEqual(cfg.wake_schedule.rules[0].days, frozenset({0}))  # one day, without a list
+            self.assertEqual([str(n) for n in cfg.allowed_networks], ["100.64.0.0/10"])
 
     def test_config(self):
         with tempfile.TemporaryDirectory() as d:
@@ -526,24 +931,45 @@ class ScheduleTest(unittest.TestCase):
 [location]
 lat = 60.2
 lon = 24.9
-[device]
+[screens.home]
+grid = "."
+[screens.trains]
+grid = "."
+[decks.day]
+screens = ["home", "trains"]
+start = "trains"
+[decks.night]
+screens = ["home"]
+[schedule]
 wake_interval_minutes = 5
-[[device.schedule]]
+[[schedule.rules]]
 days = "weekdays"
 from = "07:00"
 to = "09:00"
 every = 1
-[[device.schedule]]
+[[schedule.rules]]
 days = ["sat", "Sunday"]
 from = "23:00"
 to = "06:00"
 every = 15
+deck = "night"
+[[schedule.rules]]
+from = "12:00"
+to = "13:00"
+deck = "night"
 ''')
             cfg = config.load(path)
-        self.assertEqual(cfg.wake_schedule.default_every, 5)
-        self.assertEqual(cfg.wake_schedule.rules[0], schedule.WakeRule(frozenset(range(5)), 420, 540, 1))
-        self.assertEqual(cfg.wake_schedule.rules[1].days, frozenset({5, 6}))
-        self.assertEqual(cfg.wake_schedule.rules[1].end, 360)
+        sched = cfg.wake_schedule
+        self.assertEqual((sched.default_every, sched.default_deck), (5, "day"))  # default deck: the first
+        self.assertEqual(sched.rules[0], schedule.WakeRule(frozenset(range(5)), 420, 540, 1))
+        self.assertEqual(sched.rules[1].days, frozenset({5, 6}))
+        self.assertEqual(sched.rules[1].end, 360)
+        self.assertEqual(sched.rules[2].every, 5)  # no `every`: the default interval
+        self.assertEqual(cfg.decks["day"], decks.Deck("day", ("home", "trains"), "trains"))
+        self.assertEqual(cfg.start_screen, "trains")
+        self.assertEqual(cfg.deck_at(self.t(8, 0)).name, "day")  # a rule without a deck: the default
+        self.assertEqual(cfg.deck_at(self.t(12, 30)).name, "night")
+        self.assertEqual(cfg.deck_at(self.t(23, 30, day=14)).name, "night")  # Saturday night
 
     def test_wakes_just_after_the_minute(self):
         p = schedule.plan(self.t(7, 30, 3), EVERY_1, 2)
@@ -573,13 +999,32 @@ every = 15
 
     def test_prerendered(self):
         cache = schedule.Prerendered()
-        self.assertIsNone(cache.get(self.t(7, 30, 2), "/glance.png"))
-        cache.put(self.t(7, 30), {"/glance.png": b"png", "/glance.g2": b"g2"})
-        self.assertEqual(cache.get(self.t(7, 30), "/glance.png"), b"png")  # early wake, snapped
-        self.assertEqual(cache.get(self.t(7, 30, 2), "/glance.g2"), b"g2")  # on-time wake
-        self.assertIsNone(cache.get(self.t(7, 30, 35), "/glance.png"))  # mid-minute: draw fresh
-        self.assertIsNone(cache.get(self.t(7, 31, 2), "/glance.png"))  # next minute
-        self.assertIsNone(cache.get(self.t(7, 30, 2), "/other"))
+        self.assertIsNone(cache.get(self.t(7, 30, 2), "home", "/glance.png"))
+        cache.put(self.t(7, 30), "home", {"/glance.png": b"png", "/glance.g2": b"g2"})
+        self.assertEqual(cache.get(self.t(7, 30), "home", "/glance.png"), b"png")  # early wake, snapped
+        self.assertEqual(cache.get(self.t(7, 30, 2), "home", "/glance.g2"), b"g2")  # on-time wake
+        self.assertIsNone(cache.get(self.t(7, 30, 2), "trains", "/glance.png"))  # another screen selected since
+        self.assertIsNone(cache.get(self.t(7, 30, 35), "home", "/glance.png"))  # mid-minute: draw fresh
+        self.assertIsNone(cache.get(self.t(7, 31, 2), "home", "/glance.png"))  # next minute
+        self.assertIsNone(cache.get(self.t(7, 30, 2), "home", "/other"))
+        # The neighbours, drawn after it for the same minute, join it.
+        cache.put(self.t(7, 30), "trains", {"/glance.png": b"trains"})
+        self.assertEqual(cache.get(self.t(7, 30, 2), "home", "/glance.png"), b"png")
+        self.assertEqual(cache.get(self.t(7, 30, 2), "trains", "/glance.png"), b"trains")
+        # For a press that changes the screen: anywhere in that minute.
+        late = self.t(7, 30, 50)
+        self.assertIsNone(cache.get(late, "trains", "/glance.png"))
+        self.assertEqual(cache.get(late, "trains", "/glance.png", max_late=timedelta(minutes=1)), b"trains")
+        # A new minute starts afresh.
+        cache.put(self.t(7, 31), "home", {"/glance.png": b"png2"})
+        self.assertIsNone(cache.get(self.t(7, 31, 2), "trains", "/glance.png"))
+        # Drawn from one fetch's departures; a later fetch has landed since.
+        cache.put(self.t(7, 35), "home", {"/glance.png": b"old"}, data="fetch 1")
+        self.assertEqual(cache.get(self.t(7, 35, 2), "home", "/glance.png", data="fetch 1"), b"old")
+        self.assertIsNone(cache.get(self.t(7, 35, 2), "home", "/glance.png", data="fetch 2"))
+        self.assertEqual(cache.get(self.t(7, 35, 2), "home", "/glance.png"), b"old")  # no data to compare
+        cache.put(self.t(7, 35), "trains", {"/glance.png": b"new"}, data="fetch 2")  # redrawn: the old ones go
+        self.assertIsNone(cache.get(self.t(7, 35, 2), "home", "/glance.png", data="fetch 2"))
 
     def test_recent_shares_one_drawing(self):
         recent = schedule.Recent()
@@ -665,7 +1110,7 @@ class BatteryTest(unittest.TestCase):
     def test_status_bar(self):
         now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
         sc = render.Scene(now=now, language="fi", forecast=fmi.Forecast(now, []),
-                          weather_stale_after=timedelta(minutes=45), stops=[], battery_percent=40)
+                          weather_stale_after=timedelta(minutes=45), stops={}, battery_percent=40)
         self.assertIsNone(render._status_warning(sc))
         self.assertEqual(render._status_warning(replace(sc, battery_percent=15)), "Lataa akku")
         self.assertEqual(i18n.percent("fi", 87), "87\u202f%")
@@ -676,7 +1121,7 @@ class TransitTest(unittest.TestCase):
     def test_refresh_during_fetch_waits_for_it(self):
         import threading, time
         from glance.__main__ import Transit
-        cfg = isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("HSL:1",))])
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
         calls = []
 
@@ -700,7 +1145,7 @@ class TransitTest(unittest.TestCase):
         # for good, leaving the server up with no polling or pre-drawn images.
         from unittest import mock
         from glance.__main__ import Transit, Weather
-        cfg = isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("HSL:1",))])
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         with mock.patch.object(fmi, "fetch", side_effect=RuntimeError("surprise")), \
                 mock.patch.object(hsl, "fetch", side_effect=RuntimeError("surprise")), \
                 self.assertLogs("glance", "ERROR") as logs:
@@ -724,7 +1169,7 @@ class TransitTest(unittest.TestCase):
         # good data if the fetch hasn't answered in time.
         import threading, time
         from glance.__main__ import Transit
-        cfg = isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("HSL:1",))])
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
         release = threading.Event()
         transit._fetch = lambda now: release.wait(5)
@@ -740,10 +1185,118 @@ class TransitTest(unittest.TestCase):
         import threading
         from unittest import mock
         from glance.__main__ import Transit
-        transit = Transit(isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("HSL:1",))]))
+        transit = Transit(isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))]))
         with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")), \
                 self.assertLogs("glance", "WARNING"):
             transit.refresh(wait_seconds=1)
+
+    def test_waiting_callers_share_one_thread(self):
+        # A fetch that never finishes: every request used to leave a thread
+        # stuck behind it, until the service's thread limit stopped the server.
+        import threading
+        from glance.__main__ import Transit
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
+        transit = Transit(cfg)
+        release = threading.Event()
+        fetches = []
+        transit._fetch = lambda now: (fetches.append(now), release.wait(10))
+        transit.refresh(60, wait_seconds=0.01)
+        stuck = transit.background
+        for _ in range(10):
+            transit.refresh(60, wait_seconds=0.01)
+            self.assertIs(transit.background, stuck)  # waited on the same thread
+        self.assertTrue(stuck.is_alive())
+        self.assertEqual(len(fetches), 1)
+        release.set()
+        stuck.join(5)
+        transit.refresh(wait_seconds=1)  # and once it has ended, the next caller starts a new one
+        self.assertIsNot(transit.background, stuck)
+        self.assertEqual(len(fetches), 2)
+
+    def test_refresh_is_not_lost_behind_a_caller_content_with_older_data(self):
+        # A plain request takes departures up to a minute old; its thread ends
+        # without fetching. A button press that waited on that thread wants
+        # them at most 10 s old, and must still get its fetch.
+        import threading, time
+        from glance.__main__ import Transit
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
+        transit = Transit(cfg)
+        fetches = []
+        transit._fetch = fetches.append
+
+        def someone_elses_thread():
+            transit.background = threading.Thread(target=time.sleep, args=(0.2,), daemon=True)
+            transit.background.start()
+
+        transit.last_attempt = time.monotonic() - 30  # the last fetch was 30 s ago
+        someone_elses_thread()
+        transit.refresh(60, wait_seconds=2)  # 30 s old is fine for this caller
+        self.assertEqual(len(fetches), 0)
+        someone_elses_thread()
+        transit.refresh(10, wait_seconds=2)  # not for this one
+        self.assertEqual(len(fetches), 1)
+
+    def test_stops_given_by_code_keep_their_departures_too(self):
+        # The empty answer used to drop the stop codes as well, so the kept
+        # departures couldn't be found: the widget showed its code and nothing.
+        from unittest import mock
+        from glance.__main__ import Transit
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("", ("H0001",))])
+        transit = Transit(cfg)
+        dep = departures.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
+        now = datetime.now(HELSINKI)
+
+        def shown():
+            stop = transit.stops(now)["s0"]
+            return stop.name, stop.departures
+
+        with mock.patch.object(hsl, "resolve_code", side_effect=hsl.HSLError("down")), \
+                mock.patch.object(hsl, "fetch", wraps=hsl.fetch), self.assertLogs("glance", "WARNING"):
+            transit.refresh()  # the code can't be looked up yet: nothing asked, nothing fetched
+        self.assertIsNone(transit.fetched_at)  # so the status bar says "unavailable", not "no departures"
+        with mock.patch.object(hsl, "resolve_code", return_value="HSL:1"), \
+                mock.patch.object(hsl, "fetch", return_value=({"HSL:1": [dep]}, {"HSL:1": "Pasilan asema"}, {})):
+            transit.refresh()
+        self.assertEqual(shown(), ("Pasilan asema", [dep]))
+        fetched_at = transit.fetched_at
+        with mock.patch.object(hsl, "fetch", return_value=({}, {}, {})), self.assertLogs("glance", "WARNING"):
+            transit.refresh()  # an empty answer
+        self.assertEqual(shown(), ("Pasilan asema", [dep]))
+        with mock.patch.object(hsl, "resolve_code", side_effect=hsl.HSLError("down")), \
+                mock.patch.object(hsl, "fetch", return_value=({}, {}, {})), self.assertLogs("glance", "WARNING"):
+            transit.refresh()  # and the next poll, with the lookup failing as well
+        self.assertEqual(shown(), ("Pasilan asema", [dep]))
+        self.assertEqual(transit.fetched_at, fetched_at)
+        self.assertEqual(json.loads((cfg.cache_dir / "stop_codes.json").read_text()), {"H0001": "HSL:1"})
+
+    def test_answer_without_the_stops_keeps_the_last_departures(self):
+        from unittest import mock
+        from glance.__main__ import Transit
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
+        transit = Transit(cfg)
+        dep = departures.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
+        with mock.patch.object(hsl, "fetch", return_value=({"HSL:1": [dep]}, {"HSL:1": "Stop"}, {})):
+            transit.refresh()
+        fetched_at = transit.fetched_at
+        for empty in ({}, {"HSL:ELSEWHERE": []}):
+            with mock.patch.object(hsl, "fetch", return_value=(empty, {}, {})), self.assertLogs("glance", "WARNING"):
+                transit.refresh()
+            self.assertEqual(transit.by_stop, {"HSL:1": [dep]})
+            self.assertEqual(transit.fetched_at, fetched_at)  # so the status bar says how old they are
+        with mock.patch.object(hsl, "fetch", return_value=({"HSL:1": []}, {}, {})):
+            transit.refresh()  # the stop with nothing leaving it is an answer
+        self.assertEqual(transit.by_stop, {"HSL:1": []})
+
+    def test_clock_set_back_does_not_hold_off_fetches(self):
+        from unittest import mock
+        from glance.__main__ import Weather
+        cfg = isolated_config(self)
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        weather = Weather(cfg)
+        weather.forecast = fmi.Forecast(datetime.now(UTC) + timedelta(days=2), hours)  # fetched "in the future"
+        with mock.patch.object(fmi, "fetch", return_value=fmi.Forecast(datetime.now(UTC), hours)) as fetch:
+            weather.refresh()
+        self.assertEqual(fetch.call_count, 1)
 
     def test_failed_weather_fetch_is_retried_sooner(self):
         from unittest import mock
@@ -754,20 +1307,20 @@ class TransitTest(unittest.TestCase):
             weather.refresh()
             weather.refresh()                                  # too soon
             self.assertEqual(fetch.call_count, 1)
-            weather.last_attempt -= timedelta(minutes=3)       # not the full 15 minutes
+            weather.last_attempt -= 180                        # not the full 15 minutes
             weather.refresh()
             self.assertEqual(fetch.call_count, 2)
         with mock.patch.object(fmi, "fetch", return_value=fmi.Forecast(datetime.now(UTC), hours)) as fetch:
-            weather.last_attempt -= timedelta(minutes=3)
+            weather.last_attempt -= 180
             weather.refresh()
-            weather.last_attempt -= timedelta(minutes=3)       # after a success: the full interval again
+            weather.last_attempt -= 180                        # after a success: the full interval again
             weather.refresh()
             self.assertEqual(fetch.call_count, 1)
 
     def test_renumbered_stop_is_looked_up_again(self):
         from unittest import mock
         from glance.__main__ import Transit
-        cfg = isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("H0001",))])
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("H0001",))])
         (cfg.cache_dir / "stop_codes.json").write_text('{"H0001": "HSL:OLD", "H0002": "HSL:ELSEWHERE"}')
         transit = Transit(cfg)
         seen = []
@@ -788,7 +1341,7 @@ class TransitTest(unittest.TestCase):
     def test_unknown_stop_code_is_looked_up_once(self):
         from unittest import mock
         from glance.__main__ import Transit
-        cfg = isolated_config(self, digitransit_key="test", stops=[config.Stop("A", ("H9999",))])
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("H9999",))])
         transit = Transit(cfg)
         with mock.patch.object(hsl, "resolve_code", return_value=None) as lookup, \
                 mock.patch.object(hsl, "fetch", return_value=({}, {}, {})), self.assertLogs("glance", "WARNING"):
@@ -805,8 +1358,9 @@ class ServerTest(unittest.TestCase):
         # No key: placeholder departures, no network.
         cfg = isolated_config(self)
         self.battery = battery.Battery()
+        self.prerendered = schedule.Prerendered()
         self.server = ThreadingHTTPServer(
-            ("127.0.0.1", 0), make_handler(cfg, Weather(cfg), Transit(cfg), None, self.battery)
+            ("127.0.0.1", 0), make_handler(cfg, Weather(cfg), Transit(cfg), self.prerendered, self.battery)
         )
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -846,9 +1400,9 @@ class ServerTest(unittest.TestCase):
         fixed = schedule.Plan(datetime.now(HELSINKI).replace(second=30), sleep_seconds=300, interval_minutes=5)
         slow = render.render
 
-        def draw(*a):
+        def draw(*a, **kw):
             time.sleep(1.6)
-            return slow(*a)
+            return slow(*a, **kw)
 
         with mock.patch.object(schedule, "plan", return_value=fixed), mock.patch.object(render, "render", side_effect=draw):
             with self.get("/glance.png") as r:
@@ -865,6 +1419,50 @@ class ServerTest(unittest.TestCase):
             self.get("/glance.png?refresh=1&battery_mv=3840").read()
             self.assertEqual(self.battery.level(datetime.now(HELSINKI)), 50)
             self.assertIn(mock.call(10, wait_seconds=mock.ANY), refresh.mock_calls)
+
+    def test_buttons_move_through_the_deck(self):
+        from unittest import mock
+        from urllib.request import urlopen
+        # config.toml's example: by day the "day" deck, with two screens.
+        noon = datetime.now(HELSINKI).replace(hour=12, minute=0, second=30)
+        self.enterContext(mock.patch.object(schedule, "plan", return_value=schedule.Plan(noon, 300, 5)))
+        with self.get("/glance.png") as r:
+            self.assertEqual(r.headers["X-Glance-Screen"], "day: home (1/2)")
+            self.assertEqual(r.headers["X-Glance-Deck-Size"], "2")
+        with self.get("/glance.png?button=next") as r:
+            self.assertEqual(r.headers["X-Glance-Screen"], "day: departures (2/2)")
+        with self.get("/glance.g2") as r:  # a timed wake keeps the screen
+            self.assertEqual(r.headers["X-Glance-Screen"], "day: departures (2/2)")
+        with urlopen(self.base + "/glance.png?button=next") as r:  # without the client header: ignored
+            self.assertEqual(r.headers["X-Glance-Screen"], "day: departures (2/2)")
+        with self.get("/glance.png?button=next") as r:  # wraps around
+            self.assertEqual(r.headers["X-Glance-Screen"], "day: home (1/2)")
+        with self.get("/glance.png?button=prev") as r:
+            self.assertEqual(r.headers["X-Glance-Screen"], "day: departures (2/2)")
+
+    def test_one_screen_deck_answers_no_change(self):
+        from unittest import mock
+        night = datetime.now(HELSINKI).replace(hour=23, minute=30, second=5)
+        fixed = schedule.Plan(night, sleep_seconds=300, interval_minutes=15)
+        with mock.patch.object(schedule, "plan", return_value=fixed):
+            with self.get("/glance.g2?button=next") as r:
+                self.assertEqual(r.status, 204)  # the device keeps its image: no 6 s refresh
+                self.assertEqual(r.read(), b"")
+                self.assertEqual(r.headers["X-Glance-Sleep"], "300")
+                self.assertEqual(r.headers["X-Glance-Deck-Size"], "1")
+            with self.get("/glance.g2?button=refresh") as r:  # the green button still refreshes
+                self.assertEqual((r.status, r.headers["X-Glance-Screen"]), (200, "night: home (1/1)"))
+
+    def test_screen_change_uses_the_screen_drawn_ahead(self):
+        from unittest import mock
+        from glance.__main__ import Transit
+        noon = datetime.now(HELSINKI).replace(hour=12, minute=0, second=40, microsecond=0)
+        self.enterContext(mock.patch.object(schedule, "plan", return_value=schedule.Plan(noon, 260, 5)))
+        self.prerendered.put(noon.replace(second=0), "departures", {"/glance.png": b"drawn ahead"})
+        with mock.patch.object(render, "render") as draw, mock.patch.object(Transit, "refresh"):
+            with self.get("/glance.png?button=next") as r:  # 40 s into the minute: still that minute's
+                self.assertEqual(r.read(), b"drawn ahead")
+            draw.assert_not_called()
 
     def test_dripping_request_is_dropped(self):
         # One byte at a time never trips a per-read timeout; the whole request has a deadline.
@@ -936,6 +1534,43 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(host_allowed("glance.home.example:8080", ("glance.home.example",)))
         self.assertTrue(host_allowed("my_pi.lan", ("my_pi.lan",)))  # listed names count as they are
         self.assertTrue(host_allowed("my_pi:8080"))
+
+    def test_client_allowed(self):
+        import ipaddress
+        from glance.__main__ import client_allowed
+        for address in ("192.168.1.50", "10.0.0.2", "172.16.5.1", "127.0.0.1", "169.254.3.4", "::1",
+                        "fe80::1%eth0", "fd12:3456::1", "::ffff:192.168.1.50"):
+            self.assertTrue(client_allowed(address), address)
+        # Public addresses: what a port forwarded by mistake would let in.
+        for address in ("8.8.8.8", "2001:4860:4860::8888", "::ffff:8.8.8.8", "100.64.0.1", "nonsense", "",
+                        "2002:c000:204::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2"):  # 6to4, Teredo: public clients
+            self.assertFalse(client_allowed(address), address)
+        vpn = (ipaddress.ip_network("100.64.0.0/10"),)
+        self.assertTrue(client_allowed("100.64.0.1", vpn))
+        self.assertFalse(client_allowed("8.8.8.8", vpn))
+        self.assertFalse(client_allowed("2001:4860:4860::8888", vpn))  # not an error for the other family
+
+    def test_public_address_is_refused(self):
+        import urllib.error
+        from unittest import mock
+        with mock.patch("glance.__main__.client_allowed", return_value=False):
+            for path in ("/", "/glance.png"):
+                with self.assertRaises(urllib.error.HTTPError) as refused:
+                    self.get(path)
+                self.assertEqual(refused.exception.code, 403)
+
+    def test_answer_headers(self):
+        import http.client
+        for path in ("/", "/glance.png", "/nothing-here"):
+            conn = http.client.HTTPConnection(*self.server.server_address)
+            conn.request("GET", path)
+            r = conn.getresponse()
+            r.read()
+            conn.close()
+            with self.subTest(path):
+                self.assertEqual(r.headers["Server"], "Glance")  # no Python version
+                self.assertEqual(r.headers["X-Content-Type-Options"], "nosniff")
+                self.assertEqual(r.headers["X-Frame-Options"], "DENY")
 
     def test_log_escapes_control_characters(self):
         from glance.__main__ import log_safe

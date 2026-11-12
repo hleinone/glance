@@ -2,22 +2,20 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from . import layout as layout_
+from . import widgets as widgets_
+from .decks import Deck
+from .widgets import HslStops, Widget
 from .schedule import DAY_NAMES, WakeRule, WakeSchedule
 
 ROOT = Path(__file__).resolve().parent.parent
-
-
-@dataclass(frozen=True)
-class Stop:
-    name: str  # "" = use HSL's name for the stop
-    ids: tuple[str, ...] = ()  # stop codes ("H0665") and/or gtfsIds ("HSL:1174411")
-    routes: frozenset[str] = frozenset()  # empty = all routes
 
 
 @dataclass(frozen=True)
@@ -31,9 +29,14 @@ class Config:
     weather_refresh_minutes: int
     weather_stale_after_minutes: int
     cache_dir: Path
+    widgets: dict[str, Widget]
+    screens: dict[str, layout_.Layout]
+    decks: dict[str, Deck]
     # Extra names the server may be called by (Host header), besides IP
     # addresses, single-label names and .local ones; see host_allowed().
     hostnames: tuple[str, ...] = ()
+    # Networks besides private ones that may reach the server; see client_allowed().
+    allowed_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = ()
     digitransit_key: str | None = None
     departures_poll_lead_seconds: int = 15
     departures_min_refresh_seconds: int = 10
@@ -41,7 +44,26 @@ class Config:
     wake_schedule: WakeSchedule = WakeSchedule()
     wake_offset_seconds: float = 2
     battery_full_mv: int = 4200  # what this device reads for a full battery
-    stops: list[Stop] = field(default_factory=list)
+
+    @property
+    def stops(self) -> dict[str, HslStops]:
+        """The stop widgets on any screen, by name, in screen and layout order."""
+        return {n: w for lay in self.screens.values() for n in lay.names if isinstance(w := self.widgets[n], HslStops)}
+
+    @property
+    def start_screen(self) -> str:
+        """The default deck's starting screen (`render` without a screen, for example)."""
+        return self.decks[self.wake_schedule.default_deck].start
+
+    def deck_at(self, t) -> Deck:
+        return self.decks[self.wake_schedule.deck_at(t)]
+
+
+# The screen setup: these come from config.local.toml together, if it sets any
+# of them, so config.toml's examples can't leak into it (an example widget's
+# settings into a local one of the same name, an example rule's deck into a
+# local schedule).
+SETUP = ("widgets", "screens", "decks", "schedule")
 
 
 def _merge(base: dict, override: dict) -> dict:
@@ -63,21 +85,40 @@ def load(path: Path | None = None, local_overrides: bool = True) -> Config:
     local = path.with_name("config.local.toml")
     if local_overrides and local.exists():
         with open(local, "rb") as f:
-            raw = _merge(raw, tomllib.load(f))
+            local_raw = tomllib.load(f)
+        if any(key in local_raw for key in SETUP):
+            raw = {key: value for key, value in raw.items() if key not in SETUP}
+        raw = _merge(raw, local_raw)
 
     language = raw.get("language", "en")
     if language not in ("en", "fi"):
         raise ValueError(f"language must be 'en' or 'fi', not {language!r}")
 
+    device = raw.get("device", {})
+    for old, new, used in (
+        ("[stops]", "[widgets.<name>] with type = \"hsl_stops\"", "stops" in raw),
+        ("[weather]", "[fmi]", "weather" in raw),
+        ("[layout]", "[screens.<name>]", "layout" in raw),
+        ("[[device.schedule]]", "[[schedule.rules]]", "schedule" in device),
+        ("[device] wake_interval_minutes", "[schedule] wake_interval_minutes", "wake_interval_minutes" in device),
+    ):
+        if used:
+            raise ValueError(f"{old} is no longer used: see config.toml ({new})")
     location = raw["location"]
     server = raw.get("server", {})
-    weather = raw.get("weather", {})
+    weather = raw.get("fmi", {})
     digitransit = raw.get("digitransit", {})
-    device = raw.get("device", {})
     key = (local_overrides and os.environ.get("GLANCE_DIGITRANSIT_KEY")) or digitransit.get("key") or None
     hostnames = server.get("hostnames", [])
     if isinstance(hostnames, str):
         hostnames = [hostnames]
+    networks = server.get("allowed_networks", [])
+    if isinstance(networks, str):
+        networks = [networks]
+    try:
+        networks = tuple(ipaddress.ip_network(str(n), strict=False) for n in networks)
+    except ValueError as e:
+        raise ValueError(f"[server] allowed_networks: {e} (use networks like \"100.64.0.0/10\")") from None
     cache_dir = Path(raw.get("cache", {}).get("dir", "cache"))
     if not cache_dir.is_absolute():
         cache_dir = path.parent / cache_dir
@@ -85,39 +126,128 @@ def load(path: Path | None = None, local_overrides: bool = True) -> Config:
     return Config(
         language=language,
         tz=ZoneInfo(raw.get("timezone", "Europe/Helsinki")),
-        lat=float(location["lat"]),
-        lon=float(location["lon"]),
+        lat=_within(location["lat"], -90, 90, "[location] lat", float),
+        lon=_within(location["lon"], -180, 180, "[location] lon", float),
         host=server.get("host", "0.0.0.0"),
-        port=int(server.get("port", 8080)),
-        weather_refresh_minutes=int(weather.get("refresh_minutes", 15)),
-        weather_stale_after_minutes=int(weather.get("stale_after_minutes", 45)),
+        port=_within(server.get("port", 8080), 1, 65535, "[server] port"),
+        weather_refresh_minutes=_within(weather.get("refresh_minutes", 15), 1, 24 * 60, "[fmi] refresh_minutes"),
+        weather_stale_after_minutes=_within(weather.get("stale_after_minutes", 45), 1, 7 * 24 * 60, "[fmi] stale_after_minutes"),
         cache_dir=cache_dir,
+        **_setup(raw),
         hostnames=tuple(str(h).rstrip(".").lower() for h in hostnames),
+        allowed_networks=networks,
         digitransit_key=key,
         # Under a minute: the poll belongs to the minute it runs before.
         departures_poll_lead_seconds=_within(digitransit.get("poll_lead_seconds", 15), 0, 59, "poll_lead_seconds"),
         departures_min_refresh_seconds=_within(digitransit.get("min_refresh_seconds", 10), 0, 3600, "min_refresh_seconds"),
-        departures_stale_after_minutes=int(digitransit.get("stale_after_minutes", 5)),
-        wake_schedule=_wake_schedule(device),
+        departures_stale_after_minutes=_within(digitransit.get("stale_after_minutes", 5), 1, 7 * 24 * 60, "[digitransit] stale_after_minutes"),
         wake_offset_seconds=_within(device.get("wake_offset_seconds", 2), 0, 59, "wake_offset_seconds", float),
-        battery_full_mv=int(raw.get("battery", {}).get("full_mv", 4200)),
-        stops=[_stop(s) for s in raw.get("stops", [])],
+        # Within what the device can report (battery.PLAUSIBLE_MV), and a LiPo can be full at.
+        battery_full_mv=_within(raw.get("battery", {}).get("full_mv", 4200), 3500, 5000, "[battery] full_mv"),
     )
 
 
-def _stop(raw: dict) -> Stop:
-    # `codes` (as on the stop sign, e.g. "H0665") and `ids` (e.g. "HSL:1174411")
-    # both end up in Stop.ids; codes are resolved to ids at runtime.
-    ids = []
-    for key in ("codes", "code", "ids", "id"):
-        value = raw.get(key, [])
-        # str(): an unquoted code (codes = [1234]) is a number in TOML.
-        ids.extend(str(v) for v in ([value] if isinstance(value, (str, int)) else value))
-    return Stop(
-        name=raw.get("name", ""),
-        ids=tuple(ids),
-        routes=frozenset(str(r) for r in raw.get("routes", [])),
+def _setup(raw: dict) -> dict:
+    """Widgets, screens, decks and the schedule, checked against each other."""
+    widgets = _widgets(raw)
+    screens = _screens(raw, widgets)
+    decks = _decks(raw, screens)
+    return {"widgets": widgets, "screens": screens, "decks": decks,
+            "wake_schedule": _schedule(raw.get("schedule", {}), decks)}
+
+
+def _widgets(raw: dict) -> dict[str, Widget]:
+    widgets = {}
+    for name, w in raw.get("widgets", {}).items():
+        if not isinstance(w, dict):
+            raise ValueError(f"widget {name!r}: expected a [widgets.{name}] section")
+        kind = w.get("type")
+        if kind not in widgets_.TYPES:
+            raise ValueError(f"widget {name!r}: type must be one of {', '.join(widgets_.TYPES)}, not {kind!r}")
+        module = widgets_.TYPES[kind]
+        unknown = set(w) - module.SETTINGS - {"type"}
+        if unknown:
+            raise ValueError(f"widget {name!r} ({kind}): unknown setting(s) {', '.join(sorted(unknown))}")
+        widgets[name] = module.parse(w)
+    return widgets
+
+
+def _screens(raw: dict, widgets: dict[str, Widget]) -> dict[str, layout_.Layout]:
+    sections = raw.get("screens", {})
+    if not sections:
+        raise ValueError("no screens: add a [screens.<name>] section with a grid (see config.toml)")
+    screens = {}
+    for name, s in sections.items():
+        if not isinstance(s, dict) or not s.get("grid"):
+            raise ValueError(f"screen {name!r}: [screens.{name}] needs a grid")
+        _no_unknown(s, {"grid"}, f"screen {name!r}")
+        try:
+            lay = layout_.parse(s["grid"])
+            for widget in lay.names:
+                if widget not in widgets:
+                    raise ValueError(f"the grid names {widget!r}, but there is no [widgets.{widget}]")
+            for area in lay.areas:
+                _check_size(area, lay, widgets[area.name])
+        except ValueError as e:
+            raise ValueError(f"screen {name!r}: {e}") from None
+        screens[name] = lay
+    return screens
+
+
+def _decks(raw: dict, screens: dict[str, layout_.Layout]) -> dict[str, Deck]:
+    sections = raw.get("decks", {})
+    if not sections:  # one deck of every screen, in order
+        return {"all": Deck("all", tuple(screens), next(iter(screens)))}
+    decks = {}
+    for name, d in sections.items():
+        if not isinstance(d, dict):
+            raise ValueError(f"deck {name!r}: expected a [decks.{name}] section")
+        _no_unknown(d, {"screens", "start"}, f"deck {name!r}")
+        names = d.get("screens") or []
+        if isinstance(names, str):
+            names = [names]
+        if not names:
+            raise ValueError(f"deck {name!r}: screens = [...] is missing")
+        for screen in names:
+            if screen not in screens:
+                raise ValueError(f"deck {name!r}: there is no [screens.{screen}]")
+        if len(set(names)) != len(names):
+            raise ValueError(f"deck {name!r}: a screen is listed twice")
+        start = d.get("start", names[0])
+        if start not in names:
+            raise ValueError(f"deck {name!r}: start = {start!r} is not one of its screens")
+        decks[name] = Deck(name, tuple(names), start)
+    return decks
+
+
+def _no_unknown(section: dict, allowed: set[str], what: str) -> None:
+    unknown = set(section) - allowed
+    if unknown:
+        raise ValueError(f"{what}: unknown setting(s) {', '.join(sorted(unknown))}")
+
+
+def _check_size(area: layout_.Area, lay: layout_.Layout, widget: Widget) -> None:
+    x0, y0, x1, y1 = lay.rect(area)
+    min_w, min_h = widget.MIN_SIZE
+    if x1 - x0 >= min_w and y1 - y0 >= min_h:
+        return
+    hints = []
+    if x1 - x0 < min_w:
+        hints.append(_cells_needed(min_w, area.col, lay.cols, lay.x, "column"))
+    if y1 - y0 < min_h:
+        hints.append(_cells_needed(min_h, area.row, lay.rows, lay.y, "row"))
+    raise ValueError(
+        f"widget {area.name!r} ({widget.TYPE}) needs at least {min_w}×{min_h} px; in this "
+        f"{lay.cols}×{lay.rows} grid it gets {x1 - x0}×{y1 - y0}: give it {' and '.join(hints)}"
     )
+
+
+def _cells_needed(need: int, start: int, count: int, edge, unit: str) -> str:
+    """How many cells (from the area's first one) give `need` pixels."""
+    for n in range(1, count + 1):
+        if edge(min(start, count - n) + n) - edge(min(start, count - n)) >= need:
+            return f"{n} {unit}s"
+    return f"more {unit}s than the grid has (use fewer, bigger {unit}s)"
 
 
 _DAY_GROUPS = {"weekdays": DAY_NAMES[:5], "weekend": DAY_NAMES[5:], "all": DAY_NAMES}
@@ -135,25 +265,58 @@ def _minutes(text: str) -> int:
 
 
 def _within(value, low: float, high: float, name: str, number=int):
-    value = number(value)
+    try:
+        # bool is a number to Python: `port = true` would otherwise be port 1.
+        value = number("" if isinstance(value, bool) else value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number, not {value!r}") from None
     if not low <= value <= high:
         raise ValueError(f"{name} must be {low}..{high}, not {value}")
     return value
 
 
-def _wake_schedule(device: dict) -> WakeSchedule:
+def _schedule(raw: dict, decks: dict[str, Deck]) -> WakeSchedule:
+    _no_unknown(raw, {"default_deck", "wake_interval_minutes", "rules"}, "[schedule]")
+    default_every = _interval(raw.get("wake_interval_minutes", 1), "wake_interval_minutes")
+    default_deck = raw.get("default_deck", next(iter(decks)))
+    if default_deck not in decks:
+        raise ValueError(f"[schedule] default_deck: there is no [decks.{default_deck}]")
     rules = []
-    for raw in device.get("schedule", []):
-        days = raw.get("days", "all")
-        names = _DAY_GROUPS[days] if isinstance(days, str) else days
-        every = _interval(raw["every"], "schedule 'every'")
+    for i, rule in enumerate(raw.get("rules", []), 1):
+        what = f"schedule rule {i}"
+        if not isinstance(rule, dict):
+            raise ValueError(f"{what}: expected a [[schedule.rules]] section")
+        _no_unknown(rule, {"days", "from", "to", "every", "deck"}, what)
+        for key in ("from", "to"):
+            if key not in rule:
+                raise ValueError(f"{what}: {key} = \"HH:MM\" is missing")
+        names = _days(rule.get("days", "all"), what)
+        deck = rule.get("deck")
+        if deck is not None and deck not in decks:
+            raise ValueError(f"{what}: there is no [decks.{deck}]")
         rules.append(WakeRule(
-            days=frozenset(DAY_NAMES.index(d.lower()[:3]) for d in names),
-            start=_minutes(raw["from"]),
-            end=_minutes(raw["to"]),
-            every=every,
+            days=frozenset(DAY_NAMES.index(d) for d in names),
+            start=_minutes(rule["from"]),
+            end=_minutes(rule["to"]),
+            # Without `every`, the default interval; without `deck`, the default deck.
+            every=_interval(rule.get("every", default_every), f"{what} 'every'"),
+            deck=deck,
         ))
-    return WakeSchedule(tuple(rules), _interval(device.get("wake_interval_minutes", 1), "wake_interval_minutes"))
+    return WakeSchedule(tuple(rules), default_every, default_deck)
+
+
+def _days(days, what: str) -> tuple[str, ...]:
+    """A rule's `days`: "weekdays", "weekend", "all", one day or a list of days
+    ("mon", "Friday"), as three-letter names."""
+    if isinstance(days, str):
+        if days.lower() in _DAY_GROUPS:
+            return _DAY_GROUPS[days.lower()]
+        days = [days]  # one day
+    names = tuple(str(d).lower()[:3] for d in days) if isinstance(days, list) else ()
+    if not names or any(n not in DAY_NAMES for n in names):
+        raise ValueError(f"{what}: days must be \"weekdays\", \"weekend\", \"all\" or days like "
+                         f"[\"mon\", \"fri\"], not {days!r}")
+    return names
 
 
 def _interval(value, name: str) -> int:

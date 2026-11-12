@@ -31,7 +31,11 @@ import svg_render
 ROOT = Path(__file__).resolve().parent.parent
 OUT = ROOT / "icons" / "fmi"
 SRC = OUT / "src"
-BASE_URL = "https://raw.githubusercontent.com/fmidev/opendata-resources/master/symbols/WeatherSymbol3"
+# Pinned to a commit, not the moving master branch: a missing source is
+# fetched again as the file the committed ones came from (checked identical,
+# after the stripping below, 2026-11-13).
+BASE_URL = ("https://raw.githubusercontent.com/fmidev/opendata-resources/"
+            "18f6074ebedf2f964295195f439940e6963fab8d/symbols/WeatherSymbol3")
 CODES = [1, 2, 3, 21, 22, 23, 31, 32, 33, 41, 42, 43, 51, 52, 53,
          61, 62, 63, 64, 71, 72, 73, 81, 82, 83, 91, 92]
 

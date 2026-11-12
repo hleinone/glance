@@ -29,11 +29,13 @@ flowchart LR
 ```
 
 - **Weather:** current conditions, today's high and low, "feels like", wind,
-  and a 12-hour forecast with chance of precipitation, using FMI's own weather
-  symbols adapted for 4-grey e-paper.
-- **Departures:** the next 8 from up to three stops, merged across platforms
-  if you like, with HSL's vehicle pictograms. Realtime times are black,
-  timetable-only grey; trams have filled route badges, trunk buses grey ones.
+  and an hourly forecast with chance of precipitation (as many hours as fit:
+  12 in the layout above), using FMI's own weather symbols adapted for 4-grey
+  e-paper.
+- **Departures:** as many as fit in each stop widget (8 in the layout above),
+  merged across platforms if you like, with HSL's vehicle pictograms.
+  Realtime times are black, timetable-only grey; trams have filled route
+  badges, trunk buses grey ones.
   Countdowns ("5 min") when the screen updates every minute, clock times
   ("14.32") when it updates less often.
 - **Battery-aware schedule:** the server tells the device when to wake next
@@ -41,8 +43,9 @@ flowchart LR
   15 at night), aimed just after the minute changes so the clock is right.
   Images are drawn in advance so the device's radio is on for as short a time
   as possible.
-- **Buttons:** any of the three buttons wakes the device for an update with
-  freshly fetched departures.
+- **Screens and buttons:** several screens, in decks picked by time of day;
+  the two white buttons step through the deck, the green one updates the
+  screen with freshly fetched departures.
 - **Robust:** stale data is flagged in the status bar; if the server can't be
   reached, the device retries less and less often and marks the screen offline.
 
@@ -85,13 +88,48 @@ key = "your-digitransit-key"
 lat = 60.1987
 lon = 24.9327
 
-[[stops]]           # up to three; replaces the examples in config.toml
+# The screen: a grid picture of widget names. [widgets], [screens], [decks]
+# and [schedule] here replace all of config.toml's examples.
+[screens.home]
+grid = """
+weather weather hours hours hours  hours
+trams   trams   buses buses trains trains
+trams   trams   buses buses trains trains
+"""
+
+[widgets.weather]
+type = "fmi_weather_now"
+
+[widgets.hours]
+type = "fmi_weather_hourly"
+
+[widgets.trams]
+type = "hsl_stops"
 codes = ["H0665", "H0664"]   # several codes are merged into one widget
 name = "Pasila trams"        # optional; defaults to HSL's stop name
+
+[widgets.buses]
+type = "hsl_stops"
+codes = ["H2100", "H2101"]
+
+[widgets.trains]
+type = "hsl_stops"
+codes = ["H0086"]
+
+[schedule]                   # how often the device wakes
+wake_interval_minutes = 5
+
+[[schedule.rules]]           # weekday mornings: every minute
+days = "weekdays"
+from = "07:00"
+to = "09:00"
+every = 1
 ```
 
-`config.toml` documents the rest: language (`en`/`fi`), the wake schedule,
-refresh intervals.
+`config.toml` documents the rest: language (`en`/`fi`), the widget types and
+their settings, more screens and decks of screens to switch between, the
+schedule, refresh intervals. `mise run render -- --screen NAME` draws one
+screen to `glance.png`.
 
 ```bash
 mise run serve    # preview at http://localhost:8080/
@@ -103,8 +141,9 @@ mise run test
 Any Pi on the home network works; it was built on a Pi 1 Model B (the slowest
 there is) running Raspberry Pi OS 13. It needs:
 
-- Python 3.11 or newer (Raspberry Pi OS 12 or later; the sandboxed service
-  was only tried on Raspberry Pi OS 13).
+- Python 3.11 or newer, which Raspberry Pi OS 12 has. It has only been run on
+  Raspberry Pi OS 13 (Python 3.13, Pillow 11), though: on an older release
+  neither the drawing nor the sandboxed service has been tried.
 - A fixed address: reserve one for it in your router's DHCP settings. The
   device is given the server's IP address, not its name.
 - SSH key login from your machine (`ssh-copy-id pi@raspberrypi.local`): the
@@ -157,7 +196,9 @@ Glance is made for a home network you trust, and should stay there:
 
 - The server has no login and speaks plain HTTP. Anyone on the network can see
   the dashboard, which shows the stops near your home. **Don't forward its
-  port to the internet.**
+  port to the internet.** As a backstop the server refuses requests from
+  public addresses; if you reach it from another range (a VPN's, say), add
+  it to `[server] allowed_networks`.
 - The server refuses requests that call it by an unexpected host name, so a
   web page can't read the dashboard through your browser. IP addresses,
   `.local` names and single-word names work; add any other name to
@@ -174,8 +215,9 @@ Glance is made for a home network you trust, and should stay there:
 
 ## Development
 
-`CLAUDE.md` holds the design decisions and measurements behind all this (the
-project was built with Claude Code). `mise run icons` rebuilds the icon PNGs
+`CLAUDE.md` holds the architecture and the rules the project is worked by, and
+the `CLAUDE.md` in each folder the design decisions and measurements behind
+that part (the project was built with Claude Code). `mise run icons` rebuilds the icon PNGs
 from their SVG sources (macOS only); `mise run screenshot` re-renders the screenshot above.
 
 ## Licence

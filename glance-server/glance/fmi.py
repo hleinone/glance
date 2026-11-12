@@ -18,6 +18,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from . import upstream
+
 log = logging.getLogger(__name__)
 
 WFS_URL = "https://opendata.fmi.fi/wfs"
@@ -31,7 +33,13 @@ NS = {
 }
 
 USER_AGENT = "glance-dashboard/0.1"
-TIMEOUT = 10  # seconds; weather is fetched in the background, nothing waits on it
+# Seconds; weather is fetched in the background, nothing waits on it. TIMEOUT
+# is for each step (connecting, each read), DEADLINE for the whole answer.
+TIMEOUT = 10
+DEADLINE = 20
+# Hours dated outside these years are left out: nothing real, and a time near
+# the edge of what datetime holds can't be converted to local time for drawing.
+YEARS = range(2000, 2100)
 
 
 @dataclass(frozen=True)
@@ -132,6 +140,12 @@ def _parse(xml: bytes) -> list[Hour]:
         if not time_text or not name:
             continue
         t = datetime.fromisoformat(time_text.replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            # FMI's times are UTC and say so ("Z"). One without a zone can't
+            # be compared with the clock, which would fail every drawing.
+            t = t.replace(tzinfo=UTC)
+        if t.year not in YEARS:
+            continue
         by_time.setdefault(t, {})[name] = _value(
             el.findtext("BsWfs:ParameterValue", namespaces=NS)
         )
@@ -147,7 +161,9 @@ def _parse(xml: bytes) -> list[Hour]:
                 wind_speed=v.get("WindSpeedMS"),
                 wind_direction=v.get("WindDirection"),
                 pop=v.get("PoP"),
-                symbol=int(symbol) if symbol is not None else None,
+                # A code is a small number; anything else has no icon (and a
+                # huge one made a file name too long to look for).
+                symbol=int(symbol) if symbol is not None and 0 <= symbol < 1000 else None,
                 feels_like=v.get("FeelsLike"),
             )
         )
@@ -161,13 +177,12 @@ def fetch(lat: float, lon: float, tz: ZoneInfo, now: datetime | None = None) -> 
     url = build_url(lat, lon, local_midnight, now + timedelta(hours=36))
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            body = resp.read()
+        body = upstream.read(req, TIMEOUT, DEADLINE)
     except urllib.error.HTTPError as e:
         # FMI puts the reason in an XML exception report in the body; a proxy
         # in front of it may answer with anything.
         try:
-            parse(e.read())
+            parse(upstream.read_error(e, DEADLINE))
         except FMIError as fe:
             raise FMIError(f"HTTP {e.code}: {fe}") from e
         except (OSError, http.client.HTTPException):
