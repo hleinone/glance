@@ -26,7 +26,7 @@ On the Pi: `journalctl --user-unit glance -f` for the log (`journalctl --user -u
 - `glance/schedule.py`: wake times, the moment an image is drawn for, images drawn ahead (`Prerendered`) and shared (`Recent`).
 - `glance/config.py`: `config.toml` and `config.local.toml`, checked at load.
 - `glance/layout.py`, `glance/decks.py`, `glance/widgets/`: screens, decks, widget types.
-- `glance/render.py`, `glance/draw.py`, `glance/scene.py`, `glance/i18n.py`: drawing. `draw.py` imports nothing of ours, so widgets can use it without import cycles; it also holds the pen small icons are drawn with (`Pen`).
+- `glance/render.py`, `glance/draw.py`, `glance/scene.py`, `glance/i18n.py`: drawing. `draw.py` imports nothing of ours, so widgets can use it without import cycles; it also holds the pen small icons are drawn with (`Pen`). `i18n.py` holds the formats for dates, times, ages and percentages; words belong to whoever shows them, each part keeping its own `WORDS` in English and Finnish (a widget, a source, the status bar).
 - `glance/battery.py`: the battery level.
 - `deploy/`, `tools/` (icons, screenshot), `tests/`.
 
@@ -53,7 +53,7 @@ Both clients were verified against the live APIs; `tests/data/` has a real answe
 ## When things go wrong
 
 - `Weather.refresh` and `Transit.refresh` never raise: every way a fetch fails becomes `FMIError` or `HSLError`, or is caught and logged, and the refresher loop guards each round as well. (One unexpected answer once ended the refresher thread for good, with nothing to restart it.)
-- The last good data stays. The right of the status bar is empty while data is fresh; weather over 45 minutes old or departures over 5 minutes old get an inverted badge ("Departures 12 min old"), and stale realtime minutes are drawn grey like timetable ones.
+- The last good data stays. The right of the status bar is empty while data is fresh; weather over 45 minutes old or departures over 5 minutes old get an inverted badge ("Departures 12 min old"). Each source says when its data counts as old or missing and in what words (`warning()`), and the status bar lists what they say, then its own "Charge battery"; and stale realtime minutes are drawn grey like timetable ones.
 - An answer with none of the stops asked for is a failed fetch, not "no departures". When no stop can be asked for (its codes not looked up yet), nothing counts as fetched.
 - A stop code HSL doesn't know is looked up once per run. A cached id HSL no longer knows (stops get renumbered) is looked up again once per run, and keeps its old id until a new one comes (`Transit.stale_codes`), so departures kept from before can still be found.
 - Data that can't be drawn is stopped twice. The parsers take times without a zone as UTC, leave out hours and departures dated outside 2000–2099, symbol codes outside 0–999 and NaN or infinite values, cut HSL text to 80 characters and refuse fields that aren't text. And the server draws with `render(..., forgiving=True)`: a widget that raises leaves its area empty and a traceback in the log. Tests and `render` on the command line stay strict, so the deploy's pre-check still catches mistakes.
@@ -89,7 +89,7 @@ Both clients were verified against the live APIs; `tests/data/` has a real answe
 
 Settled with the user on the real panel. The default is a 6×3 grid: current weather 2×1, the hourly forecast 4×1 (12 hours) and three stop widgets 2×2 (8 departures each).
 
-- **Status bar** (30 px, black): date and time on the left; page dots in the middle on a deck of two or more (the showing screen filled; "3/12" above 8 screens); on the right the battery level, and a warning badge only when something is wrong. No "updated" time: data fetched just before the minute made it read a minute behind.
+- **Status bar** (30 px, black): date and time on the left; page dots in the middle on a deck of two or more (the showing screen filled; "3/12" above 8 screens); on the right the battery level, and a warning badge only when something is wrong: what the sources report, then a low battery. No "updated" time: data fetched just before the minute made it read a minute behind.
 - **Current weather:** icon, a big temperature with today's high over low right after it (the temperature shrinks rather than overlap them), the condition, then "feels like" and wind.
 - **Hourly forecast:** temperature, icon, chance of precipitation (every hour, 0 % too, since a gap looked like an error; rounded to 10 %), hour.
 - **Stops:** HSL's mode pictograms and the stop name, then per departure a route badge (filled black for a tram, outlined for a bus, light grey with an outline for a trunk bus; dark grey was too close to black on the panel), the destination and the minutes (black for realtime, dark grey for timetable only).

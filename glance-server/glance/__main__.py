@@ -37,13 +37,13 @@ def scene(
         now=now,
         language=cfg.language,
         forecast=weather.forecast,
-        weather_stale_after=timedelta(minutes=cfg.weather_stale_after_minutes),
         stops=transit.stops(now),
         departures_live=transit.live,
         departures_fetched_at=transit.fetched_at,
-        departures_stale_after=timedelta(minutes=cfg.departures_stale_after_minutes),
+        departures_stale_after=transit.stale_after,
         battery_percent=device_battery.level(now) if device_battery else None,
         departure_clock=interval_minutes > 1,
+        warnings=sources.warnings(now, cfg.language),
     )
 
 

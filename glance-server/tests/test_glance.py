@@ -148,7 +148,7 @@ class FMITest(unittest.TestCase):
             self.assertIsNone(fmi.load_cache(Path(d) / "missing.json"))
 
     def test_fmi_icons_cover_every_code(self):
-        for code in fmi.SYMBOLS:
+        for code in fmi_symbols.SYMBOLS:
             for size in (76, 36):
                 icon = fmi_symbols.fmi_symbol(code, size)
                 self.assertIsNotNone(icon, (code, size))
@@ -160,9 +160,9 @@ class FMITest(unittest.TestCase):
         self.assertTrue((fmi_symbols.FMI_DIR / "LICENSE").exists())
 
     def test_symbols(self):
-        self.assertEqual(fmi.symbol_info(31, "fi"), ("rain", 1, "Heikkoa vesisadetta"))
-        self.assertEqual(fmi.symbol_info(2, "en"), ("partly_cloudy", 1, "Partly cloudy"))
-        self.assertEqual(fmi.symbol_info(999, "en")[0], "unknown")
+        self.assertEqual(fmi_symbols.symbol_info(31, "fi"), ("rain", 1, "Heikkoa vesisadetta"))
+        self.assertEqual(fmi_symbols.symbol_info(2, "en"), ("partly_cloudy", 1, "Partly cloudy"))
+        self.assertEqual(fmi_symbols.symbol_info(999, "en")[0], "unknown")
 
     def test_forecast_helpers(self):
         fc = fmi.Forecast(datetime(2026, 11, 9, 20, tzinfo=UTC), fmi.parse((DATA / "fmi_simple.xml").read_bytes()))
@@ -656,8 +656,8 @@ class WidgetSizeTest(unittest.TestCase):
     def worst_case(self, language: str, clock: bool) -> render.Scene:
         """Data that takes the most room: long texts, wide temperatures, three modes."""
         now = self.NOW
-        symbol = max((s for s in range(1, 100) if fmi.symbol_info(s, language)[2]),
-                     key=lambda s: len(fmi.symbol_info(s, language)[2]))
+        symbol = max((s for s in range(1, 100) if fmi_symbols.symbol_info(s, language)[2]),
+                     key=lambda s: len(fmi_symbols.symbol_info(s, language)[2]))
         start = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=8)
         hours = [fmi.Hour(time=(start + timedelta(hours=i)).astimezone(UTC), temperature=-20.4 - (i % 2) * 8.2,
                           wind_speed=15.4, wind_direction=45.0, pop=100, symbol=symbol, feels_like=-35.4)
@@ -671,7 +671,7 @@ class WidgetSizeTest(unittest.TestCase):
                       key=lambda d: d.time)
         stop = hsl.StopDepartures("Itäkeskus(M) Kauppakeskus Itis, laituri 12", deps, ("subway", "rail", "tram"))
         return render.Scene(now=now, language=language, forecast=fmi.Forecast(now, hours),
-                            weather_stale_after=timedelta(minutes=45), stops={"w": stop}, departure_clock=clock)
+                            stops={"w": stop}, departure_clock=clock)
 
     def drawn_outside(self, widget, size: tuple[int, int], sc: render.Scene) -> tuple | None:
         """Bounding box of anything drawn outside the rectangle, or None."""
@@ -762,7 +762,6 @@ class RenderTest(unittest.TestCase):
             now=self.now,
             language="en",
             forecast=fmi.Forecast(self.now - timedelta(minutes=5), hours),
-            weather_stale_after=timedelta(minutes=45),
             stops={w: hsl.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.stops, "ABC"))},
         )
 
@@ -801,12 +800,13 @@ class RenderTest(unittest.TestCase):
     def test_status_text(self):
         self.assertEqual(render._status_warning(self.scene), None)
         live = replace(self.scene, departures_live=True, departures_fetched_at=self.now - timedelta(minutes=12))
-        self.assertTrue(live.departures_stale)
-        self.assertEqual(render._status_warning(live), "Departures 12 min old")
+        self.assertTrue(live.departures_stale)  # so the stops draw realtime times grey
         fresh = replace(live, departures_fetched_at=self.now - timedelta(seconds=40))
         self.assertFalse(fresh.departures_stale)
-        self.assertEqual(render._status_warning(fresh), None)
-        self.assert_panel_image(render.render(self.cfg, live))
+        # The status bar shows what the sources say, then its own warning.
+        warned = replace(self.scene, warnings=("Weather 2 h old", "Departures 12 min old"), battery_percent=10)
+        self.assertEqual(render._status_warning(warned), "Weather 2 h old · Departures 12 min old · Charge battery")
+        self.assert_panel_image(render.render(self.cfg, replace(live, warnings=("Departures 12 min old",))))
 
     def test_page_dots(self):
         from PIL import ImageChops
@@ -821,7 +821,8 @@ class RenderTest(unittest.TestCase):
         second = render.render(self.cfg, self.scene, "departures", two)
         self.assertNotEqual(second.crop(box).tobytes(), dotted.crop(box).tobytes())  # the other dot filled
         # A long warning takes the room: no dots then.
-        warned = replace(self.scene, forecast=None, departures_live=True, battery_percent=10)
+        warned = replace(self.scene, forecast=None, departures_live=True, battery_percent=10,
+                         warnings=("Weather unavailable", "Departures unavailable"))
         self.assertEqual(render.render(self.cfg, warned, "home", two).tobytes(),
                          render.render(self.cfg, warned, "home").tobytes())
 
@@ -1166,7 +1167,7 @@ class BatteryTest(unittest.TestCase):
     def test_status_bar(self):
         now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
         sc = render.Scene(now=now, language="fi", forecast=fmi.Forecast(now, []),
-                          weather_stale_after=timedelta(minutes=45), stops={}, battery_percent=40)
+                          stops={}, battery_percent=40)
         self.assertIsNone(render._status_warning(sc))
         self.assertEqual(render._status_warning(replace(sc, battery_percent=15)), "Lataa akku")
         self.assertEqual(i18n.percent("fi", 87), "87\u202f%")
@@ -1422,6 +1423,41 @@ class TransitTest(unittest.TestCase):
         sources.weather.forecast = fmi.Forecast(datetime.now(UTC), hours)
         self.assertNotEqual(sources.data_times(), before)  # so a drawing shared for a few seconds is redrawn
         self.assertIn(sources.weather, sources.periodic)  # and the refresher refreshes it
+
+    def test_weather_says_when_its_forecast_is_missing_or_old(self):
+        from glance.sources.fmi import Weather
+        cfg = isolated_config(self)  # [fmi] stale_after_minutes = 45
+        weather = Weather(cfg)
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+        self.assertEqual(weather.warning(now, "en"), "Weather unavailable")
+        weather.forecast = fmi.Forecast(now - timedelta(minutes=45), [])
+        self.assertIsNone(weather.warning(now, "en"))
+        weather.forecast = fmi.Forecast(now - timedelta(hours=2), [])
+        self.assertEqual(weather.warning(now, "en"), "Weather 2 h old")
+        self.assertEqual(weather.warning(now, "fi"), "Sää 2 h vanha")
+
+    def test_departures_say_when_they_are_missing_or_old(self):
+        from glance.sources.hsl import Transit
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
+        transit = Transit(cfg)  # [digitransit] stale_after_minutes = 5
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+        self.assertEqual(transit.warning(now, "en"), "Departures unavailable")  # live, never fetched
+        transit.fetched_at = now - timedelta(minutes=12)
+        self.assertEqual(transit.warning(now, "en"), "Departures 12 min old")
+        self.assertEqual(transit.warning(now, "fi"), "Lähdöt 12 min vanhoja")
+        transit.fetched_at = now - timedelta(seconds=40)
+        self.assertIsNone(transit.warning(now, "en"))
+        placeholders = Transit(isolated_config(self))  # no key: placeholders are never old
+        self.assertIsNone(placeholders.warning(now, "en"))
+
+    def test_status_bar_lists_weather_then_departures(self):
+        from glance.sources import Sources
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
+        sources = Sources.make(cfg)
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+        self.assertEqual(sources.warnings(now, "en"), ("Weather unavailable", "Departures unavailable"))
+        sources.weather.forecast = fmi.Forecast(now, [])
+        self.assertEqual(sources.warnings(now, "en"), ("Departures unavailable",))
 
     def test_renumbered_stop_is_looked_up_again(self):
         from unittest import mock

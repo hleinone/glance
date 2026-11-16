@@ -1,4 +1,6 @@
-"""FMI's weather symbols, shared by the two FMI weather widgets.
+"""FMI's weather symbols, shared by the two FMI weather widgets: what each
+WeatherSymbol3 code is called in English and Finnish (`symbol_info`), and its
+picture.
 
 FMI's own WeatherSymbol3 symbols are adapted for 4-grey e-paper and
 pre-rendered to PNG by tools/build_fmi_icons.py (`fmi_symbol`). The drawings
@@ -14,6 +16,46 @@ from pathlib import Path
 from PIL import Image
 
 from ..draw import BLACK, LIGHT, WHITE, Pen
+
+# code: (icon kind, intensity 1-3, English, Finnish)
+SYMBOLS: dict[int, tuple[str, int, str, str]] = {
+    1: ("clear", 1, "Clear", "Selkeää"),
+    2: ("partly_cloudy", 1, "Partly cloudy", "Puolipilvistä"),
+    3: ("cloudy", 1, "Cloudy", "Pilvistä"),
+    21: ("rain_showers", 1, "Light showers", "Heikkoja sadekuuroja"),
+    22: ("rain_showers", 2, "Showers", "Sadekuuroja"),
+    23: ("rain_showers", 3, "Heavy showers", "Voimakkaita sadekuuroja"),
+    31: ("rain", 1, "Light rain", "Heikkoa vesisadetta"),
+    32: ("rain", 2, "Rain", "Vesisadetta"),
+    33: ("rain", 3, "Heavy rain", "Voimakasta vesisadetta"),
+    41: ("snow_showers", 1, "Light snow showers", "Heikkoja lumikuuroja"),
+    42: ("snow_showers", 2, "Snow showers", "Lumikuuroja"),
+    43: ("snow_showers", 3, "Heavy snow showers", "Voimakkaita lumikuuroja"),
+    51: ("snow", 1, "Light snow", "Heikkoa lumisadetta"),
+    52: ("snow", 2, "Snow", "Lumisadetta"),
+    53: ("snow", 3, "Heavy snow", "Voimakasta lumisadetta"),
+    61: ("thunder", 1, "Thundershowers", "Ukkoskuuroja"),
+    62: ("thunder", 2, "Heavy thundershowers", "Voimakkaita ukkoskuuroja"),
+    63: ("thunder", 2, "Thunderstorm", "Ukkosta"),
+    64: ("thunder", 3, "Heavy thunderstorm", "Voimakasta ukkosta"),
+    71: ("sleet_showers", 1, "Light sleet showers", "Heikkoja räntäkuuroja"),
+    72: ("sleet_showers", 2, "Sleet showers", "Räntäkuuroja"),
+    73: ("sleet_showers", 3, "Heavy sleet showers", "Voimakkaita räntäkuuroja"),
+    81: ("sleet", 1, "Light sleet", "Heikkoa räntäsadetta"),
+    82: ("sleet", 2, "Sleet", "Räntäsadetta"),
+    83: ("sleet", 3, "Heavy sleet", "Voimakasta räntäsadetta"),
+    91: ("fog", 1, "Mist", "Utua"),
+    92: ("fog", 2, "Fog", "Sumua"),
+}
+
+
+def symbol_info(code: int | None, language: str) -> tuple[str, int, str]:
+    """Return (icon kind, intensity, description) for a WeatherSymbol3 code."""
+    if code is None or code not in SYMBOLS:
+        return ("unknown", 1, "—")
+    kind, intensity, en, fi = SYMBOLS[code]
+    return kind, intensity, fi if language == "fi" else en
+
 
 FMI_DIR = Path(__file__).resolve().parent.parent.parent / "icons" / "fmi"
 

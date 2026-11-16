@@ -15,10 +15,13 @@ from .. import i18n
 from ..draw import BLACK, DARK, Pen, font, fit_text, fmt_temp, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
-from ..sources import fmi
-from .fmi_symbols import weather_icon
+from .fmi_symbols import symbol_info, weather_icon
 
 TYPE = "fmi_weather_now"
+WORDS = {
+    "en": {"weather_unavailable": "Weather unavailable", "feels_like": "Feels like {temp}"},
+    "fi": {"weather_unavailable": "Säätietoja ei saatavilla", "feels_like": "Tuntuu kuin {temp}"},
+}
 SETTINGS: set[str] = set()  # besides `type`
 
 
@@ -38,11 +41,11 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
     fc = sc.forecast
     hour = fc.current(sc.now) if fc else None
     if hour is None:
-        f, text = fit_text(i18n.t(sc.language, "weather_unavailable"), "medium", 16, 12, x1 - x0 - 2 * pad)
+        f, text = fit_text(i18n.t(WORDS, sc.language, "weather_unavailable"), "medium", 16, 12, x1 - x0 - 2 * pad)
         text_vcenter(d, x0 + pad, (y0 + y1) / 2, text, f, DARK)
         return
 
-    kind, intensity, desc = fmi.symbol_info(hour.symbol, sc.language)
+    kind, intensity, desc = symbol_info(hour.symbol, sc.language)
     icon_size = 76
     paste_icon(img, weather_icon(hour.symbol, kind, intensity, icon_size), x0 + pad - 4, y0 + 8)
 
@@ -71,7 +74,7 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
     f = font("medium", 16)
     x, cy = x0 + pad, y0 + 131
     if hour.feels_like is not None:
-        text = i18n.t(sc.language, "feels_like", temp=fmt_temp(hour.feels_like))
+        text = i18n.t(WORDS, sc.language, "feels_like", temp=fmt_temp(hour.feels_like))
         text_vcenter(d, x, cy, text, f, BLACK)
         x += f.getlength(text) + 16
     if hour.wind_speed is not None:

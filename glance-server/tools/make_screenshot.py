@@ -90,7 +90,6 @@ def winter_morning() -> render.Scene:
         now=now,
         language="en",
         forecast=forecast,
-        weather_stale_after=timedelta(minutes=45),
         stops=stops,
         departures_live=True,
         departures_fetched_at=now - timedelta(seconds=19),

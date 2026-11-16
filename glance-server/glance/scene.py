@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .sources import fmi
-from .sources.hsl import StopDepartures
+from .sources.hsl import StopDepartures, stale
 
 
 @dataclass(frozen=True)
@@ -14,7 +14,6 @@ class Scene:
     now: datetime  # local, aware
     language: str
     forecast: fmi.Forecast | None
-    weather_stale_after: timedelta
     stops: dict[str, StopDepartures]  # by stop widget name
     # Live departures: False while all stops show placeholders.
     departures_live: bool = False
@@ -24,10 +23,9 @@ class Scene:
     # Departures as clock times (14.32) instead of minutes: when the device
     # updates only every few minutes, countdowns would go stale.
     departure_clock: bool = False
+    # What the sources say is old or missing, for the status bar.
+    warnings: tuple[str, ...] = ()
 
     @property
     def departures_stale(self) -> bool:
-        return self.departures_live and (
-            self.departures_fetched_at is None
-            or self.now - self.departures_fetched_at > self.departures_stale_after
-        )
+        return stale(self.departures_live, self.departures_fetched_at, self.now, self.departures_stale_after)

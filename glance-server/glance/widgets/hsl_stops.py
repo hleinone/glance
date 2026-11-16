@@ -18,6 +18,10 @@ from ..scene import Scene
 from ..sources.hsl import MODE_ORDER, Departure
 
 TYPE = "hsl_stops"
+WORDS = {
+    "en": {"now": "now", "min": "min", "no_departures": "No departures"},
+    "fi": {"now": "nyt", "min": "min", "no_departures": "Ei lähtöjä"},
+}
 SETTINGS = {"name", "codes", "code", "ids", "id", "routes"}  # besides `type`
 
 # Rows at least this tall: 8 departures in 2 of 3 grid rows, as before layouts
@@ -64,10 +68,10 @@ def minutes_text(dep: Departure, sc: Scene) -> tuple[str, str]:
         return i18n.clock(sc.language, dep.time.astimezone(sc.now.tzinfo)), ""
     minutes = dep.minutes(sc.now)
     if minutes <= 0:
-        return i18n.t(sc.language, "now"), ""
+        return i18n.t(WORDS, sc.language, "now"), ""
     if minutes >= 60:
         return i18n.clock(sc.language, dep.time.astimezone(sc.now.tzinfo)), ""
-    return str(minutes), i18n.t(sc.language, "min")
+    return str(minutes), i18n.t(WORDS, sc.language, "min")
 
 
 def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: str, w: HslStops) -> None:
@@ -96,13 +100,13 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
     if not deps:
         if sc.departures_live and sc.departures_fetched_at is None:
             return  # never fetched: the status bar says why; don't claim "no departures"
-        text_vcenter(d, x0 + pad, y0 + 56, i18n.t(sc.language, "no_departures"), font("medium", 16), DARK)
+        text_vcenter(d, x0 + pad, y0 + 56, i18n.t(WORDS, sc.language, "no_departures"), font("medium", 16), DARK)
         return
 
     row_h = (y1 - 6 - top) / count
     badge_w, badge_h = 46, 24
     num_font, unit_font = font("bold", 20), font("medium", 13)
-    unit_w = max(unit_font.getlength(i18n.t(sc.language, "min")), 0)
+    unit_w = max(unit_font.getlength(i18n.t(WORDS, sc.language, "min")), 0)
     for i, dep in enumerate(deps):
         cy = top + row_h * (i + 0.5)
         bx = x0 + pad

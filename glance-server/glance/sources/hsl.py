@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from .. import upstream
+from .. import i18n, upstream
 
 if TYPE_CHECKING:
     from ..config import Config
@@ -168,6 +168,18 @@ def placeholder(name: str, index: int, now: datetime) -> StopDepartures:
         ],
         modes=ordered_modes(row[4] for row in rows),
     )
+
+
+def stale(live: bool, fetched_at: datetime | None, now: datetime, stale_after: timedelta) -> bool:
+    """Live departures not fetched yet, or fetched too long ago. Placeholder
+    departures (no key, or no stops) are never stale."""
+    return live and (fetched_at is None or now - fetched_at > stale_after)
+
+
+WORDS = {
+    "en": {"departures_old": "Departures {age} old", "departures_unavailable": "Departures unavailable"},
+    "fi": {"departures_old": "Lähdöt {age} vanhoja", "departures_unavailable": "Lähtötietoja ei saatavilla"},
+}
 
 
 # --- the Digitransit client -------------------------------------------------
@@ -383,6 +395,7 @@ class Transit:
             log.info("no Digitransit key configured: showing placeholder departures")
         elif not self.configured:
             log.info("no stop codes configured: showing placeholder departures")
+        self.stale_after = timedelta(minutes=cfg.departures_stale_after_minutes)
         self.codes_path = cfg.cache_dir / "stop_codes.json"
         self.code_ids: dict[str, str] = self._load_codes()
         self.unknown_codes: set[str] = set()  # looked up and not found: not asked again until a restart
@@ -543,6 +556,16 @@ class Transit:
                 log.warning("stop %s (%s) is unknown to HSL; looking the code up again", code, stop_id)
                 self.rechecked_codes.add(code)
                 self.stale_codes.add(code)
+
+    def warning(self, now: datetime, language: str) -> str | None:
+        """For the status bar: that live departures are missing or old, else None."""
+        fetched_at = self.fetched_at
+        if not stale(self.live, fetched_at, now, self.stale_after):
+            return None
+        if fetched_at is None:
+            return i18n.t(WORDS, language, "departures_unavailable")
+        minutes = (now - fetched_at).total_seconds() / 60
+        return i18n.t(WORDS, language, "departures_old", age=i18n.age(minutes))
 
     def stops(self, now: datetime) -> dict[str, StopDepartures]:
         """By stop widget name."""

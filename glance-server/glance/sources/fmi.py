@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from .. import upstream
+from .. import i18n, upstream
 from .periodic import Periodic
 
 if TYPE_CHECKING:
@@ -242,6 +242,12 @@ def load_cache(path: Path) -> Forecast | None:
 
 # --- the latest good forecast ----------------------------------------------
 
+WORDS = {
+    "en": {"weather_old": "Weather {age} old", "weather_unavailable": "Weather unavailable"},
+    "fi": {"weather_old": "Sää {age} vanha", "weather_unavailable": "Säätietoja ei saatavilla"},
+}
+
+
 class Weather(Periodic[Forecast]):
     """Holds the latest good forecast; refreshes at most every N minutes."""
 
@@ -250,7 +256,18 @@ class Weather(Periodic[Forecast]):
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        self.stale_after = timedelta(minutes=cfg.weather_stale_after_minutes)
         super().__init__(timedelta(minutes=cfg.weather_refresh_minutes), cfg.cache_dir / "forecast.json")
+
+    def warning(self, now: datetime, language: str) -> str | None:
+        """For the status bar: that the forecast is missing or old, else None."""
+        forecast = self.forecast
+        if forecast is None:
+            return i18n.t(WORDS, language, "weather_unavailable")
+        if now - forecast.fetched_at > self.stale_after:
+            minutes = (now - forecast.fetched_at).total_seconds() / 60
+            return i18n.t(WORDS, language, "weather_old", age=i18n.age(minutes))
+        return None
 
     @property
     def forecast(self) -> Forecast | None:
@@ -278,45 +295,3 @@ class Weather(Periodic[Forecast]):
 
     def _summary(self, forecast: Forecast) -> str:
         return f"{len(forecast.hours)} hours"
-
-
-# --- WeatherSymbol3 --------------------------------------------------------
-
-# code: (icon kind, intensity 1-3, English, Finnish)
-SYMBOLS: dict[int, tuple[str, int, str, str]] = {
-    1: ("clear", 1, "Clear", "Selkeää"),
-    2: ("partly_cloudy", 1, "Partly cloudy", "Puolipilvistä"),
-    3: ("cloudy", 1, "Cloudy", "Pilvistä"),
-    21: ("rain_showers", 1, "Light showers", "Heikkoja sadekuuroja"),
-    22: ("rain_showers", 2, "Showers", "Sadekuuroja"),
-    23: ("rain_showers", 3, "Heavy showers", "Voimakkaita sadekuuroja"),
-    31: ("rain", 1, "Light rain", "Heikkoa vesisadetta"),
-    32: ("rain", 2, "Rain", "Vesisadetta"),
-    33: ("rain", 3, "Heavy rain", "Voimakasta vesisadetta"),
-    41: ("snow_showers", 1, "Light snow showers", "Heikkoja lumikuuroja"),
-    42: ("snow_showers", 2, "Snow showers", "Lumikuuroja"),
-    43: ("snow_showers", 3, "Heavy snow showers", "Voimakkaita lumikuuroja"),
-    51: ("snow", 1, "Light snow", "Heikkoa lumisadetta"),
-    52: ("snow", 2, "Snow", "Lumisadetta"),
-    53: ("snow", 3, "Heavy snow", "Voimakasta lumisadetta"),
-    61: ("thunder", 1, "Thundershowers", "Ukkoskuuroja"),
-    62: ("thunder", 2, "Heavy thundershowers", "Voimakkaita ukkoskuuroja"),
-    63: ("thunder", 2, "Thunderstorm", "Ukkosta"),
-    64: ("thunder", 3, "Heavy thunderstorm", "Voimakasta ukkosta"),
-    71: ("sleet_showers", 1, "Light sleet showers", "Heikkoja räntäkuuroja"),
-    72: ("sleet_showers", 2, "Sleet showers", "Räntäkuuroja"),
-    73: ("sleet_showers", 3, "Heavy sleet showers", "Voimakkaita räntäkuuroja"),
-    81: ("sleet", 1, "Light sleet", "Heikkoa räntäsadetta"),
-    82: ("sleet", 2, "Sleet", "Räntäsadetta"),
-    83: ("sleet", 3, "Heavy sleet", "Voimakasta räntäsadetta"),
-    91: ("fog", 1, "Mist", "Utua"),
-    92: ("fog", 2, "Fog", "Sumua"),
-}
-
-
-def symbol_info(code: int | None, language: str) -> tuple[str, int, str]:
-    """Return (icon kind, intensity, description) for a WeatherSymbol3 code."""
-    if code is None or code not in SYMBOLS:
-        return ("unknown", 1, "—")
-    kind, intensity, en, fi = SYMBOLS[code]
-    return kind, intensity, fi if language == "fi" else en
