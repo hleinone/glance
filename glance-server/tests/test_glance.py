@@ -7,8 +7,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from glance import battery, config, decks, departures, draw, hsl, i18n, icons, layout, render, schedule, widgets
-from glance.sources import fmi
+from glance import battery, config, decks, departures, draw, i18n, icons, layout, render, schedule, widgets
+from glance.sources import fmi, hsl
 from glance.widgets import fmi_weather_hourly, hsl_stops
 
 DATA = Path(__file__).parent / "data"
@@ -427,6 +427,20 @@ codes = "H0001"
         self.assertIsNone(hsl.stop_id_from_geocoding({}, "H0665"))
         self.assertTrue(hsl.is_gtfs_id("HSL:1174411"))
         self.assertFalse(hsl.is_gtfs_id("H0665"))
+
+
+class SourcesTest(unittest.TestCase):
+    def test_sources_reach_the_network_only_through_upstream(self):
+        # A source that opened its own connection would skip the deadline,
+        # the size limit and the refused redirects that upstream.read keeps.
+        import re
+        sources = Path(__file__).parent.parent / "glance" / "sources"
+        direct = re.compile(r"urlopen|build_opener|HTTPS?Connection\(|\bsocket\.|\bopen_url|requests\.")
+        modules = sorted(sources.glob("*.py"))
+        self.assertIn("hsl.py", [m.name for m in modules])
+        for module in modules:
+            with self.subTest(module.name):
+                self.assertEqual(direct.findall(module.read_text()), [], "fetch through glance.upstream.read")
 
 
 class UpstreamTest(unittest.TestCase):
@@ -1121,7 +1135,7 @@ class BatteryTest(unittest.TestCase):
 class TransitTest(unittest.TestCase):
     def test_refresh_during_fetch_waits_for_it(self):
         import threading, time
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
         calls = []
@@ -1145,7 +1159,7 @@ class TransitTest(unittest.TestCase):
         # They run in the refresher thread: an exception there used to end it
         # for good, leaving the server up with no polling or pre-drawn images.
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         from glance.sources.fmi import Weather
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         with mock.patch.object(fmi, "fetch", side_effect=RuntimeError("surprise")), \
@@ -1170,7 +1184,7 @@ class TransitTest(unittest.TestCase):
         # A request the device waits on (it gives up after 10 s) uses the last
         # good data if the fetch hasn't answered in time.
         import threading, time
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
         release = threading.Event()
@@ -1186,7 +1200,7 @@ class TransitTest(unittest.TestCase):
         # At the service's thread limit: draw with the last good data, don't fail the request.
         import threading
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         transit = Transit(isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))]))
         with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")), \
                 self.assertLogs("glance", "WARNING"):
@@ -1196,7 +1210,7 @@ class TransitTest(unittest.TestCase):
         # A fetch that never finishes: every request used to leave a thread
         # stuck behind it, until the service's thread limit stopped the server.
         import threading
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
         release = threading.Event()
@@ -1220,7 +1234,7 @@ class TransitTest(unittest.TestCase):
         # without fetching. A button press that waited on that thread wants
         # them at most 10 s old, and must still get its fetch.
         import threading, time
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
         fetches = []
@@ -1242,7 +1256,7 @@ class TransitTest(unittest.TestCase):
         # The empty answer used to drop the stop codes as well, so the kept
         # departures couldn't be found: the widget showed its code and nothing.
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("", ("H0001",))])
         transit = Transit(cfg)
         dep = departures.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
@@ -1273,7 +1287,7 @@ class TransitTest(unittest.TestCase):
 
     def test_answer_without_the_stops_keeps_the_last_departures(self):
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
         dep = departures.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
@@ -1337,7 +1351,7 @@ class TransitTest(unittest.TestCase):
 
     def test_renumbered_stop_is_looked_up_again(self):
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("H0001",))])
         (cfg.cache_dir / "stop_codes.json").write_text('{"H0001": "HSL:OLD", "H0002": "HSL:ELSEWHERE"}')
         transit = Transit(cfg)
@@ -1358,7 +1372,7 @@ class TransitTest(unittest.TestCase):
 
     def test_unknown_stop_code_is_looked_up_once(self):
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("H9999",))])
         transit = Transit(cfg)
         with mock.patch.object(hsl, "resolve_code", return_value=None) as lookup, \
@@ -1372,7 +1386,8 @@ class ServerTest(unittest.TestCase):
     def setUp(self):
         import threading
         from http.server import ThreadingHTTPServer
-        from glance.__main__ import Transit, make_handler
+        from glance.__main__ import make_handler
+        from glance.sources.hsl import Transit
         from glance.sources.fmi import Weather
         # No key: placeholder departures, no network.
         cfg = isolated_config(self)
@@ -1430,7 +1445,7 @@ class ServerTest(unittest.TestCase):
     def test_changes_need_the_client_header(self):
         # What a web page elsewhere can make a browser send: a plain GET.
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         with mock.patch.object(Transit, "refresh") as refresh:
             self.get("/glance.png?refresh=1&battery_mv=2600", client=False).read()
             self.assertIsNone(self.battery.level(datetime.now(HELSINKI)))
@@ -1474,7 +1489,7 @@ class ServerTest(unittest.TestCase):
 
     def test_screen_change_uses_the_screen_drawn_ahead(self):
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         noon = datetime.now(HELSINKI).replace(hour=12, minute=0, second=40, microsecond=0)
         self.enterContext(mock.patch.object(schedule, "plan", return_value=schedule.Plan(noon, 260, 5)))
         self.prerendered.put(noon.replace(second=0), "departures", {"/glance.png": b"drawn ahead"})

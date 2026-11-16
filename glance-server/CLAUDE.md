@@ -21,8 +21,8 @@ On the Pi: `journalctl --user-unit glance -f` for the log (`journalctl --user -u
 
 ## Code
 
-- `glance/__main__.py`: the command line (`render`, `serve`, `stops`; `-v` logs every fetch), `Weather` and `Transit` (hold the latest data and refresh it), the request handler and the refresher thread.
-- `glance/fmi.py`, `glance/hsl.py`: the two API clients. `glance/upstream.py`: how both read an answer.
+- `glance/__main__.py`: the command line (`render`, `serve`, `stops`; `-v` logs every fetch), the request handler and the refresher thread. It fetches nothing itself.
+- `glance/sources/`: one module per data source, each holding its API client, its cache and its latest good data: `fmi.py` (`Weather`) and `hsl.py` (`Transit`). `periodic.py` is what a source refreshed every so many minutes shares (`Weather` now; spot prices and others next): the interval, keeping the last good answer, retrying sooner after a failure, the disk cache. `glance/upstream.py`: how every source reads an answer; a test fails if a source opens a connection any other way.
 - `glance/schedule.py`: wake times, the moment an image is drawn for, images drawn ahead (`Prerendered`) and shared (`Recent`).
 - `glance/config.py`: `config.toml` and `config.local.toml`, checked at load.
 - `glance/layout.py`, `glance/decks.py`, `glance/widgets/`: screens, decks, widget types.
@@ -32,9 +32,9 @@ On the Pi: `journalctl --user-unit glance -f` for the log (`journalctl --user -u
 
 ## Data
 
-**FMI** (`fmi.py`): open data WFS, no key. Stored query `fmi::forecast::edited::weather::scandinavia::point::simple`, hourly Temperature, WindSpeedMS, WindDirection, PoP, WeatherSymbol3 and FeelsLike, from local midnight (so today's high and low cover the whole day; FMI returns past hours) to now + 36 h. Refreshed at most every 15 minutes by the refresher thread, never in a request; a failed fetch is retried after 2 minutes. Cached in `cache/forecast.json` with the parameters it was fetched with, so a cache from before a parameter was added is refetched at start.
+**FMI** (`sources/fmi.py`): open data WFS, no key. Stored query `fmi::forecast::edited::weather::scandinavia::point::simple`, hourly Temperature, WindSpeedMS, WindDirection, PoP, WeatherSymbol3 and FeelsLike, from local midnight (so today's high and low cover the whole day; FMI returns past hours) to now + 36 h. Refreshed at most every 15 minutes by the refresher thread, never in a request; a failed fetch is retried after 2 minutes. Cached in `cache/forecast.json` with the parameters it was fetched with, so a cache from before a parameter was added is refetched at start.
 
-**HSL** (`hsl.py`): Digitransit routing API v2 (`https://api.digitransit.fi/routing/v2/hsl/gtfs/v1`), key in the `digitransit-subscription-key` header (from `config.local.toml` or `GLANCE_DIGITRANSIT_KEY`).
+**HSL** (`sources/hsl.py`): Digitransit routing API v2 (`https://api.digitransit.fi/routing/v2/hsl/gtfs/v1`), key in the `digitransit-subscription-key` header (from `config.local.toml` or `GLANCE_DIGITRANSIT_KEY`).
 
 - One query for every stop on every screen: `stops(ids:)` → `stoptimesWithoutPatterns`, which leaves out cancelled trips and drop-off-only stops. A stop's name and vehicle mode (for its pictogram) come with it.
 - Departure time = `serviceDay + realtimeDeparture`, kept as an absolute time, so cached departures keep counting down.
@@ -79,7 +79,7 @@ Both clients were verified against the live APIs; `tests/data/` has a real answe
 
 - A screen (`[screens.<name>] grid`) is a picture of widget names, like CSS `grid-template-areas`: words per line are columns, lines are rows, each name fills a rectangle, `.` is empty. Cells share the 800×450 px below the status bar equally (`Layout.rect`).
 - A widget (`[widgets.<name>]`) has a `type`, named for its look. The type knows its data provider, so the config never names one. The types are `fmi_weather_now`, `fmi_weather_hourly` and `hsl_stops`.
-- Each type is one module in `glance/widgets/` holding everything about it: `TYPE`, `SETTINGS`, `parse()`, its fill rule and `draw()`. `widgets/__init__.py` lists them by hand; adding a type is a module and a line there. Shared drawing goes in `draw.py`, never in another widget's module. Data fetching stays in `Weather` and `Transit` until a second provider comes.
+- Each type is one module in `glance/widgets/` holding everything about it: `TYPE`, `SETTINGS`, `parse()`, its fill rule and `draw()`. `widgets/__init__.py` lists them by hand; adding a type is a module and a line there. Shared drawing goes in `draw.py`, never in another widget's module. A widget never fetches: its data comes from a source in `glance/sources/` through the scene, and a new provider is a new module there (`Periodic` if it is refreshed on an interval) plus a line in the refresher's `periodic` list and a field in `Scene`.
 - Widgets fill their rectangle: as many hourly columns as fit at 41 px, as many departure rows as fit at 32 px. Current weather keeps its one design, at the top left of a bigger area.
 - Minimum sizes are in pixels, since the same cells are a different size in another grid (`MIN_SIZE`: current weather 245×140, hourly 139×130, stops 200×72). They were chosen by drawing worst-case data. A grid that gives a widget less fails at load, saying what to change ("give it 3 columns"). `WidgetSizeTest` draws every type with worst-case data at several sizes and fails if anything lands outside its rectangle.
 - A deck (`[decks.<name>]`) is an ordered list of screens with a `start`; without decks, all screens form one. The schedule picks the deck. `decks.Selection` (in memory, shared by the device and the preview) keeps the showing screen across wakes, and starts over only when the schedule switches decks or the server restarts.

@@ -10,228 +10,24 @@ from __future__ import annotations
 import argparse
 import io
 import ipaddress
-import json
 import logging
 import re
 import socket
 import threading
 import time
 import urllib.parse
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import battery, decks, departures, hsl, render, schedule
+from . import battery, decks, render, schedule
 from .config import Config, load
+from .sources import hsl
 from .sources.fmi import Weather
+from .sources.hsl import Transit
 from .sources.periodic import Periodic
 
 log = logging.getLogger("glance")
-
-
-class Transit:
-    """Holds the latest departures for all stop widgets; refreshes every minute or so.
-
-    Departures have no disk cache: they go stale within minutes, and a restart
-    refetches. Stop codes ("H0665") are resolved to ids once and cached on disk.
-    """
-
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-        self.configured = [name for name, s in cfg.stops.items() if s.ids]
-        self.live = bool(cfg.digitransit_key and self.configured)
-        if not cfg.digitransit_key:
-            log.info("no Digitransit key configured: showing placeholder departures")
-        elif not self.configured:
-            log.info("no stop codes configured: showing placeholder departures")
-        self.codes_path = cfg.cache_dir / "stop_codes.json"
-        self.code_ids: dict[str, str] = self._load_codes()
-        self.unknown_codes: set[str] = set()  # looked up and not found: not asked again until a restart
-        self.rechecked_codes: set[str] = set()  # cached ids that HSL no longer knew, looked up again once
-        self.stale_codes: set[str] = set()  # of those, the ones still waiting for their new lookup
-        self.by_stop: dict[str, list[departures.Departure]] = {}
-        self.names: dict[str, str] = {}  # gtfsId -> HSL's stop name
-        self.modes: dict[str, str] = {}  # gtfsId -> vehicle mode ("tram", "bus", ...)
-        self.fetched_at: datetime | None = None
-        self.last_attempt: float | None = None  # time.monotonic(), like Weather's
-        self.lock = threading.Lock()  # guards by_stop, names, modes, fetched_at
-        self.fetch_lock = threading.Lock()
-        # The one thread fetching for callers that wait only so long (see refresh).
-        self.background: threading.Thread | None = None
-        self.background_lock = threading.Lock()
-
-    def _load_codes(self) -> dict[str, str]:
-        try:
-            return json.loads(self.codes_path.read_text())
-        except FileNotFoundError:
-            return {}
-        except ValueError:
-            log.warning("ignoring unreadable %s", self.codes_path)
-            return {}
-
-    def _resolve_codes(self) -> None:
-        codes = {
-            ref.upper() for s in self.cfg.stops.values() for ref in s.ids
-            if not hsl.is_gtfs_id(ref) and ref.upper() not in self.code_ids and ref.upper() not in self.unknown_codes
-        } | self.stale_codes
-        if not codes:
-            return
-        for code in sorted(codes):
-            try:
-                stop_id = hsl.resolve_code(code, self.cfg.digitransit_key)
-            except hsl.HSLError as e:
-                log.warning("could not look up stop code %s (%s); will retry", code, e)
-                continue
-            self.stale_codes.discard(code)
-            if stop_id:
-                log.info("stop code %s is %s", code, stop_id)
-                self.code_ids[code] = stop_id
-            elif code in self.code_ids:
-                # A code HSL knew before and has no stop for now: the id it
-                # had stays (its departures, if any, are still the best there is).
-                log.warning("stop code %s is no longer known to HSL; keeping %s", code, self.code_ids[code])
-            else:
-                log.warning("unknown stop code %s (check it on the stop sign or reittiopas)", code)
-                self.unknown_codes.add(code)
-        try:
-            self.codes_path.parent.mkdir(parents=True, exist_ok=True)
-            self.codes_path.write_text(json.dumps(self.code_ids, indent=1, sort_keys=True))
-        except OSError as e:
-            log.warning("could not save the stop codes: %s", e)
-
-    def _query(self, name: str) -> hsl.StopQuery:
-        stop = self.cfg.stops[name]
-        # .get, not a check and then a lookup: the fetch thread changes
-        # code_ids while requests read it.
-        found = (ref if hsl.is_gtfs_id(ref) else self.code_ids.get(ref.upper()) for ref in stop.ids)
-        return hsl.StopQuery(tuple(sid for sid in found if sid), stop.routes)
-
-    def refresh(self, min_age_seconds: float = 0, wait_seconds: float | None = None) -> None:
-        """Fetch now, unless the last attempt was less than min_age_seconds ago.
-
-        Scheduled polls run just before each minute boundary (see the server's
-        refresher); a button press on the device asks for one more.
-
-        wait_seconds: return after this long even if the fetch is still
-        running (it carries on in the background and its result is used by
-        later requests). For requests the device is waiting on: it gives up
-        after 10 s, so the last good data in time beats fresh data too late.
-        """
-        if not self.live:
-            return
-        if wait_seconds is not None:
-            # One background thread for everyone who waits: while it runs,
-            # later callers wait on it too instead of starting their own. A
-            # thread each meant that a fetch which never finished collected
-            # one stuck thread per request, up to the service's limit, after
-            # which the server could answer nobody.
-            called, give_up = time.monotonic(), time.monotonic() + wait_seconds
-            # Twice at most: the thread found running may have been started
-            # for a caller content with older data (a plain request takes
-            # departures up to a minute old, a button press 10 s) and ended
-            # without fetching. Then this caller starts its own.
-            for _ in range(2):
-                with self.background_lock:
-                    fetch = self.background
-                    if fetch is None or not fetch.is_alive():
-                        fetch = threading.Thread(target=self.refresh, args=(min_age_seconds,), daemon=True)
-                        try:
-                            fetch.start()
-                        except RuntimeError as e:  # no more threads (the service's limit): draw with what we have
-                            log.warning("could not start a departures fetch: %s", e)
-                            return
-                        self.background = fetch
-                fetch.join(max(0.0, give_up - time.monotonic()))
-                attempt = self.last_attempt
-                if fetch.is_alive() or (attempt is not None and (
-                        attempt >= called or time.monotonic() - attempt < min_age_seconds)):
-                    return  # out of time, or there has been a fetch recent enough for this caller
-            return
-        # One fetch at a time. A refresh that arrives during a fetch (e.g. a
-        # button press right after startup) waits for it, then finds it recent
-        # and uses its result, instead of skipping and drawing with no data.
-        with self.fetch_lock:
-            tick = time.monotonic()
-            if self.last_attempt is not None and tick - self.last_attempt < min_age_seconds:
-                return
-            self.last_attempt = tick
-            self._fetch(datetime.now(UTC))
-
-    def _fetch(self, now: datetime) -> None:
-        # Never raises, like Weather.refresh: the refresher thread must survive.
-        try:
-            self._resolve_codes()
-            queries = [self._query(name) for name in self.configured]
-            by_stop, names, modes = hsl.fetch(queries, self.cfg.digitransit_key, self.cfg.language)
-        except hsl.HSLError as e:
-            log.warning("departures fetch failed (%s); keeping last good data from %s", e, self.fetched_at)
-            return
-        except Exception:
-            log.exception("departures fetch failed unexpectedly; keeping last good data from %s", self.fetched_at)
-            return
-        asked = {sid for q in queries for sid in q.ids}
-        if not asked:
-            # No stop could be asked for (its codes not looked up yet, or not
-            # known to HSL): no answer, so nothing to show as fresh. The
-            # status bar says departures are unavailable; the log says why.
-            log.debug("no departures fetched: none of the stop codes is known yet")
-            return
-        if not asked & by_stop.keys():
-            # An answer with none of the stops in it (empty data during an
-            # outage at their end, say) is a failed fetch, not "no departures":
-            # the last good ones stay, and the status bar says how old they are.
-            log.warning("departures fetch failed (the answer had none of the stops asked for); "
-                        "keeping last good data from %s", self.fetched_at)
-            self._recheck_codes(by_stop)  # unless the stops were renumbered: then the next poll finds them
-            return
-        with self.lock:
-            self.by_stop, self.fetched_at = by_stop, now
-            self.names.update(names)
-            self.modes.update(modes)
-        self._recheck_codes(by_stop)
-        log.debug("departures updated: %d departures from %d stops", sum(map(len, by_stop.values())), len(by_stop))
-
-    def _recheck_codes(self, by_stop: dict) -> None:
-        """A code whose cached id HSL no longer knows (stops get renumbered) is
-        looked up afresh at the next poll, once per run. Until that lookup
-        gives a new id the old one stays: the answer may simply have been
-        empty (an outage at their end), and without the id the departures
-        kept from before couldn't be shown."""
-        for code, stop_id in list(self.code_ids.items()):
-            if stop_id not in by_stop and code not in self.rechecked_codes and any(
-                code == ref.upper() for s in self.cfg.stops.values() for ref in s.ids
-            ):
-                log.warning("stop %s (%s) is unknown to HSL; looking the code up again", code, stop_id)
-                self.rechecked_codes.add(code)
-                self.stale_codes.add(code)
-
-    def stops(self, now: datetime) -> dict[str, departures.StopDepartures]:
-        """By stop widget name."""
-        with self.lock:
-            by_stop, names, modes = self.by_stop, self.names, self.modes
-        out = {}
-        for i, (widget, stop) in enumerate(self.cfg.stops.items()):
-            if self.live and widget in self.configured:
-                query = self._query(widget)
-                out[widget] = departures.StopDepartures(
-                    self._name(stop, query, names),
-                    hsl.select(by_stop, query),
-                    departures.ordered_modes(modes[sid] for sid in query.ids if sid in modes),
-                )
-            else:
-                name = stop.name or (stop.ids[0] if stop.ids else "—")
-                out[widget] = departures.placeholder(name, i, now)
-        return out
-
-    @staticmethod
-    def _name(stop, query: hsl.StopQuery, names: dict[str, str]) -> str:
-        """The configured name, else HSL's name for the stop, else its code until known."""
-        if stop.name:
-            return stop.name
-        for stop_id in query.ids:
-            if stop_id in names:
-                return names[stop_id]
-        return stop.ids[0]
 
 
 def scene(
