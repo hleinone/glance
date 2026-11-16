@@ -1,4 +1,5 @@
-"""FMI open data forecast client (WFS, "simple" feature format, no API key).
+"""The weather source: FMI's open data forecast (WFS, "simple" feature format,
+no API key), its cache, and the latest good forecast (Weather).
 
 Docs: https://en.ilmatieteenlaitos.fi/open-data-manual
 """
@@ -16,9 +17,14 @@ import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-from . import upstream
+from .. import upstream
+from .periodic import Periodic
+
+if TYPE_CHECKING:
+    from ..config import Config
 
 log = logging.getLogger(__name__)
 
@@ -232,6 +238,46 @@ def load_cache(path: Path) -> Forecast | None:
     except (ValueError, KeyError, TypeError) as e:
         log.warning("ignoring unreadable weather cache %s: %s", path, e)
         return None
+
+
+# --- the latest good forecast ----------------------------------------------
+
+class Weather(Periodic[Forecast]):
+    """Holds the latest good forecast; refreshes at most every N minutes."""
+
+    WHAT = "weather"
+    ERRORS = (FMIError,)
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        super().__init__(timedelta(minutes=cfg.weather_refresh_minutes), cfg.cache_dir / "forecast.json")
+
+    @property
+    def forecast(self) -> Forecast | None:
+        return self.value
+
+    @forecast.setter
+    def forecast(self, forecast: Forecast | None) -> None:
+        self.value = forecast
+
+    def _fetch(self, now: datetime) -> Forecast:
+        return fetch(self.cfg.lat, self.cfg.lon, self.cfg.tz, now)
+
+    def _load(self, path: Path) -> Forecast | None:
+        return load_cache(path)
+
+    def _save(self, forecast: Forecast, path: Path) -> None:
+        save_cache(forecast, path)
+
+    def _fetched_at(self, forecast: Forecast) -> datetime:
+        return forecast.fetched_at
+
+    def _current(self, forecast: Forecast) -> bool:
+        # A cache from before a parameter was added is refetched at once.
+        return forecast.parameters == PARAMETERS
+
+    def _summary(self, forecast: Forecast) -> str:
+        return f"{len(forecast.hours)} hours"
 
 
 # --- WeatherSymbol3 --------------------------------------------------------

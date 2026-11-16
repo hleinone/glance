@@ -8,10 +8,11 @@ from typing import ClassVar
 
 from PIL import Image, ImageDraw
 
-from .. import fmi, i18n
+from .. import i18n
 from ..draw import BLACK, DARK, font, fit_text, fmt_temp, paste_icon, text_vcenter, weather_icon
 from ..layout import Rect
 from ..scene import Scene
+from ..sources import fmi
 
 TYPE = "fmi_weather_hourly"
 SETTINGS: set[str] = set()  # besides `type`

@@ -21,60 +21,12 @@ from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import battery, decks, departures, fmi, hsl, render, schedule
+from . import battery, decks, departures, hsl, render, schedule
 from .config import Config, load
+from .sources.fmi import Weather
+from .sources.periodic import Periodic
 
 log = logging.getLogger("glance")
-
-
-class Weather:
-    """Holds the latest good forecast; refreshes at most every N minutes."""
-
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-        self.cache_path = cfg.cache_dir / "forecast.json"
-        self.forecast = fmi.load_cache(self.cache_path)
-        # time.monotonic(), not the clock: the Pi has no real-time clock, and
-        # a clock set backwards would otherwise hold off fetches until it
-        # caught up.
-        self.last_attempt: float | None = None
-        self.last_failed = False
-        self.lock = threading.Lock()
-
-    RETRY_AFTER = timedelta(minutes=2)  # after a failed fetch, instead of the full interval
-
-    def refresh(self, force: bool = False) -> None:
-        now, tick = datetime.now(UTC), time.monotonic()
-        interval = timedelta(minutes=self.cfg.weather_refresh_minutes)
-        with self.lock:
-            wait = min(interval, self.RETRY_AFTER) if self.last_failed else interval
-            if not force and self.last_attempt is not None and tick - self.last_attempt < wait.total_seconds():
-                return
-            current = self.forecast and self.forecast.parameters == fmi.PARAMETERS
-            # A cached forecast "from the future" (the clock went back) is not fresh.
-            if not force and current and timedelta(0) <= now - self.forecast.fetched_at < interval:
-                return
-            self.last_attempt = tick
-            self.last_failed = True  # until the fetch below succeeds
-        # Never raises: this runs in the refresher thread, which must survive
-        # whatever a fetch does (it once died for good on an error page).
-        try:
-            fc = fmi.fetch(self.cfg.lat, self.cfg.lon, self.cfg.tz, now)
-        except fmi.FMIError as e:
-            age = f"{(now - self.forecast.fetched_at)} old" if self.forecast else "none cached"
-            log.warning("weather fetch failed (%s); using last good forecast (%s)", e, age)
-            return
-        except Exception:
-            log.exception("weather fetch failed unexpectedly; using the last good forecast")
-            return
-        with self.lock:
-            self.forecast = fc
-            self.last_failed = False
-        try:
-            fmi.save_cache(fc, self.cache_path)
-        except OSError as e:
-            log.warning("could not save the weather cache: %s", e)
-        log.info("weather updated: %d hours", len(fc.hours))
 
 
 class Transit:
@@ -606,6 +558,7 @@ def make_handler(
 
 def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
     weather, transit = Weather(cfg), Transit(cfg)
+    periodic: tuple[Periodic, ...] = (weather,)  # sources refreshed on their own intervals
     prerendered = schedule.Prerendered()
     device_battery = battery.Battery(cfg.battery_full_mv, cfg.cache_dir / "battery.csv")
     selection = decks.Selection()
@@ -620,11 +573,12 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
         # with no polling and no pre-drawn images, and nothing would restart it.
         transit.refresh(wait_seconds=POLL_WAIT)
         while not stop.is_set():
-            try:
-                # Right after a poll, so a slow answer can't delay the next one.
-                weather.refresh()  # checks its own 15-minute interval
-            except Exception:
-                log.exception("weather refresh failed")
+            # Right after a poll, so a slow answer can't delay the next one.
+            for source in periodic:
+                try:
+                    source.refresh()  # checks its own interval
+                except Exception:
+                    log.exception("%s refresh failed", source.WHAT)
             now = datetime.now(cfg.tz)
             next_poll = schedule.next_poll(now, cfg.departures_poll_lead_seconds)
             if stop.wait(max(0.0, schedule.seconds_between(now, next_poll))):

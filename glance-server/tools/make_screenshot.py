@@ -19,8 +19,9 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from glance import config, fmi, render  # noqa: E402
+from glance import config, render  # noqa: E402
 from glance.departures import Departure, StopDepartures  # noqa: E402
+from glance.sources import fmi  # noqa: E402
 
 TZ = ZoneInfo("Europe/Helsinki")
 OUT = Path(__file__).resolve().parent.parent.parent / "docs" / "screenshot.png"

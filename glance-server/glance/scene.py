@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from . import fmi
+from .sources import fmi
 from .departures import StopDepartures
 
 

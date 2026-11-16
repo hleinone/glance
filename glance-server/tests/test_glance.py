@@ -7,7 +7,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from glance import battery, config, decks, departures, draw, fmi, hsl, i18n, icons, layout, render, schedule, widgets
+from glance import battery, config, decks, departures, draw, hsl, i18n, icons, layout, render, schedule, widgets
+from glance.sources import fmi
 from glance.widgets import fmi_weather_hourly, hsl_stops
 
 DATA = Path(__file__).parent / "data"
@@ -1144,7 +1145,8 @@ class TransitTest(unittest.TestCase):
         # They run in the refresher thread: an exception there used to end it
         # for good, leaving the server up with no polling or pre-drawn images.
         from unittest import mock
-        from glance.__main__ import Transit, Weather
+        from glance.__main__ import Transit
+        from glance.sources.fmi import Weather
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         with mock.patch.object(fmi, "fetch", side_effect=RuntimeError("surprise")), \
                 mock.patch.object(hsl, "fetch", side_effect=RuntimeError("surprise")), \
@@ -1289,7 +1291,7 @@ class TransitTest(unittest.TestCase):
 
     def test_clock_set_back_does_not_hold_off_fetches(self):
         from unittest import mock
-        from glance.__main__ import Weather
+        from glance.sources.fmi import Weather
         cfg = isolated_config(self)
         hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
         weather = Weather(cfg)
@@ -1300,7 +1302,7 @@ class TransitTest(unittest.TestCase):
 
     def test_failed_weather_fetch_is_retried_sooner(self):
         from unittest import mock
-        from glance.__main__ import Weather
+        from glance.sources.fmi import Weather
         weather = Weather(isolated_config(self))
         hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
         with mock.patch.object(fmi, "fetch", side_effect=fmi.FMIError("down")) as fetch, self.assertLogs("glance", "WARNING"):
@@ -1316,6 +1318,22 @@ class TransitTest(unittest.TestCase):
             weather.last_attempt -= 180                        # after a success: the full interval again
             weather.refresh()
             self.assertEqual(fetch.call_count, 1)
+
+    def test_failed_weather_fetch_keeps_the_last_good_forecast(self):
+        from unittest import mock
+        from glance.sources.fmi import Weather
+        cfg = isolated_config(self)
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        good = fmi.Forecast(datetime.now(UTC) - timedelta(hours=1), hours)
+        fmi.save_cache(good, cfg.cache_dir / "forecast.json")
+        weather = Weather(cfg)  # starts from the cache, an hour old
+        with mock.patch.object(fmi, "fetch", side_effect=fmi.FMIError("down")) as fetch, \
+                self.assertLogs("glance", "WARNING") as logs:
+            weather.refresh()
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(weather.forecast, good)
+        self.assertIn("1:00:", logs.output[0])  # says how old the forecast it kept is
+        self.assertEqual(fmi.load_cache(cfg.cache_dir / "forecast.json"), good)
 
     def test_renumbered_stop_is_looked_up_again(self):
         from unittest import mock
@@ -1354,7 +1372,8 @@ class ServerTest(unittest.TestCase):
     def setUp(self):
         import threading
         from http.server import ThreadingHTTPServer
-        from glance.__main__ import Transit, Weather, make_handler
+        from glance.__main__ import Transit, make_handler
+        from glance.sources.fmi import Weather
         # No key: placeholder departures, no network.
         cfg = isolated_config(self)
         self.battery = battery.Battery()
