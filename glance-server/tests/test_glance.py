@@ -455,6 +455,14 @@ class UpstreamTest(unittest.TestCase):
         class Provider(BaseHTTPRequestHandler):
             def do_GET(self):
                 test.seen.append((self.path, self.headers.get("digitransit-subscription-key")))
+                if self.path == "/dripping-headers":  # a byte at a time, each within any per-read timeout
+                    try:
+                        for byte in b"HTTP/1.1 200 OK\r\nX-Padding: " + b"x" * 250 + b"\r\nContent-Length: 2\r\n\r\nok":
+                            self.wfile.write(bytes([byte]))
+                            time.sleep(0.02)
+                    except OSError:
+                        pass  # the client gave up, as it should
+                    return
                 if self.path == "/redirect":
                     self.send_response(302)
                     self.send_header("Location", "/ok")
@@ -489,7 +497,7 @@ class UpstreamTest(unittest.TestCase):
         from glance import upstream
         # As upstream's own opener, but never through a proxy from this
         # machine's environment (http_proxy), which can't reach this server.
-        direct = urllib.request.build_opener(upstream._NoRedirects, urllib.request.ProxyHandler({}))
+        direct = urllib.request.build_opener(*upstream.HANDLERS, urllib.request.ProxyHandler({}))
         self.enterContext(mock.patch.object(upstream, "_opener", direct))
         req = urllib.request.Request(f"http://127.0.0.1:{self.server.server_address[1]}{path}",
                                      headers={"digitransit-subscription-key": "secret"})
@@ -508,6 +516,15 @@ class UpstreamTest(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             self.read("/dripping", deadline=0.3)
         self.assertLess(time.monotonic() - started, 2)  # not the minute the whole answer would take
+
+    def test_headers_sent_too_slowly_time_out(self):
+        # The status line and headers take about 6 s to arrive, though no
+        # single read waits longer than the per-read timeout.
+        import time
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            self.read("/dripping-headers", deadline=0.3)
+        self.assertLess(time.monotonic() - started, 2)
 
     def test_cut_short(self):
         import http.client
