@@ -506,7 +506,7 @@ class UpstreamTest(unittest.TestCase):
         # As upstream's own opener, but never through a proxy from this
         # machine's environment (http_proxy), which can't reach this server,
         # and trusting the test certificate.
-        handlers = upstream._NoRedirects, upstream._Deadlines(ssl.create_default_context(cafile=DATA / "localhost.pem"))
+        handlers = upstream._handlers(ssl.create_default_context(cafile=DATA / "localhost.pem"))
         direct = urllib.request.build_opener(*handlers, urllib.request.ProxyHandler({}))
         self.enterContext(mock.patch.object(upstream, "_opener", direct))
         scheme = "https" if self.tls else "http"
@@ -516,6 +516,13 @@ class UpstreamTest(unittest.TestCase):
 
     def test_reads_the_answer(self):
         self.assertEqual(self.read("/ok"), b"x" * 3000)
+
+    def test_providers_are_read_with_these_limits(self):
+        # The tests above use an opener of their own (no proxy, a trusted test
+        # certificate) built from the same handlers as the real one.
+        from glance import upstream
+        kinds = {type(h) for h in upstream._opener.handlers}
+        self.assertLessEqual({type(h) for h in upstream._handlers()}, kinds)
 
     def test_too_large(self):
         with self.assertRaisesRegex(OSError, "larger"):

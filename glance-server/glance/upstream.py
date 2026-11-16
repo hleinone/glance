@@ -9,8 +9,8 @@ a size limit. Redirects are refused: neither provider uses them, and urllib
 would send the request's headers (the Digitransit key) on to wherever one
 pointed, plain HTTP included.
 
-Not covered: connecting gets what is left of the deadline once per address
-tried, and looking up the name is not limited at all.
+Not covered: connecting (with its TLS handshake) gets what is left of the
+deadline once per address tried, and looking up the name is not limited at all.
 """
 
 from __future__ import annotations
@@ -96,7 +96,12 @@ class _Deadlines(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
                             context=self._context)
 
 
-_opener = urllib.request.build_opener(_NoRedirects, _Deadlines)
+def _handlers(context=None) -> tuple[urllib.request.BaseHandler, ...]:
+    """What every provider's answer is read through: no redirects, the deadline."""
+    return _NoRedirects(), _Deadlines(context)
+
+
+_opener = urllib.request.build_opener(*_handlers())
 
 
 def _open(req: urllib.request.Request, timeout: float):

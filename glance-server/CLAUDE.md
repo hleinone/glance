@@ -46,7 +46,7 @@ On the Pi: `journalctl --user-unit glance -f` for the log (`journalctl --user -u
 
 Both clients were verified against the live APIs; `tests/data/` has a real answer from each.
 
-**Reading an answer** (`upstream.py`): with a deadline for reading the whole answer, headers included (Digitransit 10 s, FMI 20 s; urllib's own timeout only limits each read, so every read from the connection waits at most what is left of the deadline; connecting gets what is left once per address tried, and the name lookup is not limited), in pieces up to a 2 MB limit, and with redirects refused (urllib would send the key on to the redirect's target).
+**Reading an answer** (`upstream.py`): with a deadline for reading the whole answer, headers included (Digitransit 10 s, FMI 20 s; urllib's own timeout only limits each read, so every read from the connection waits at most what is left of the deadline; connecting, with its TLS handshake, gets what is left once per address tried, and the name lookup is not limited), in pieces up to a 2 MB limit, and with redirects refused (urllib would send the key on to the redirect's target).
 
 **Battery** (`battery.py`): the device sends its voltage; a LiPo curve turns it into a percentage, drawn with an icon in the status bar, with a "Charge battery" badge at 15 % or less. A report is ignored if implausible or over 2 hours old. `[battery] full_mv` is what this device reads when full (a real one reads below the curve's 4.20 V); readings are shifted by the difference. Every report is appended to `cache/battery.csv` (about 600 lines, 18 KB a day), and its last line restores the level after a restart.
 
