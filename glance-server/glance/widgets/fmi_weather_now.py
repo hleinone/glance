@@ -4,17 +4,19 @@ at the top left."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import ClassVar
 
 from PIL import Image, ImageDraw
 
-from .. import i18n, icons
-from ..draw import BLACK, DARK, font, fit_text, fmt_temp, paste_icon, text_vcenter, weather_icon
+from .. import i18n
+from ..draw import BLACK, DARK, Pen, font, fit_text, fmt_temp, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
 from ..sources import fmi
+from .fmi_symbols import weather_icon
 
 TYPE = "fmi_weather_now"
 SETTINGS: set[str] = set()  # besides `type`
@@ -74,6 +76,26 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
         x += f.getlength(text) + 16
     if hour.wind_speed is not None:
         if hour.wind_direction is not None:
-            paste_icon(img, icons.wind_arrow(hour.wind_direction, 16), round(x), round(cy - 8))
+            paste_icon(img, wind_arrow(hour.wind_direction, 16), round(x), round(cy - 8))
             x += 20
         text_vcenter(d, x, cy, f"{round(hour.wind_speed)} m/s", f, BLACK)
+
+
+def wind_arrow(direction_from: float, size: int) -> Image.Image:
+    """Arrow pointing where the wind blows to (meteorological direction + 180°)."""
+    pen = Pen(size)
+    a = math.radians(direction_from + 180)
+    # Screen coordinates: 0° = up (north), clockwise.
+    dx, dy = math.sin(a), -math.cos(a)
+    px, py = -dy, dx
+    tip = (0.5 + dx * 0.42, 0.5 + dy * 0.42)
+    tail = (0.5 - dx * 0.38, 0.5 - dy * 0.38)
+    base = (0.5 + dx * 0.02, 0.5 + dy * 0.02)
+    pen.line(tail[0], tail[1], base[0], base[1], width=round(0.14 * pen.s))
+    head = [
+        tip,
+        (base[0] + px * 0.30 - dx * 0.08, base[1] + py * 0.30 - dy * 0.08),
+        (base[0] - px * 0.30 - dx * 0.08, base[1] - py * 0.30 - dy * 0.08),
+    ]
+    pen.d.polygon([(pen.p(x), pen.p(y)) for x, y in head], fill=BLACK)
+    return pen.result(size)

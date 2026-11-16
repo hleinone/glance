@@ -12,8 +12,10 @@ Widgets fill bigger rectangles; a layout that gives one less fails when the
 config loads, and a test checks nothing is drawn outside the rectangle.
 
 A type is named for its look ("hsl_stops": HSL's pictograms and badge styles)
-and knows its data provider in code, so its config never names one. Shared
-drawing pieces go in glance/draw.py, not in another widget's module.
+and knows its data provider in code, so its config never names one. Drawing
+every widget can use goes in glance/draw.py, never in another widget's module.
+Pictures one widget draws stay in its module (hsl_stops: HSL's pictograms);
+pictures a family of widgets shares get a module named for them (fmi_symbols).
 """
 
 from __future__ import annotations

@@ -22,12 +22,12 @@ On the Pi: `journalctl --user-unit glance -f` for the log (`journalctl --user -u
 ## Code
 
 - `glance/__main__.py`: the command line (`render`, `serve`, `stops`; `-v` logs every fetch), the request handler and the refresher thread. It fetches nothing itself.
-- `glance/sources/`: one module per data source, each holding its API client, its cache and its latest good data: `fmi.py` (`Weather`) and `hsl.py` (`Transit`). `Sources` (in `sources/__init__.py`) makes them once per process and is what the commands, the refresher, the request handler and `scene()` are handed. `periodic.py` is what a source refreshed every so many minutes shares (`Weather` now; spot prices and others next): the interval, keeping the last good answer, retrying sooner after a failure, the disk cache. `glance/upstream.py`: how every source reads an answer; a test fails if a source opens a connection any other way.
+- `glance/sources/`: one module per data source, each holding its API client, its cache and its latest good data: `fmi.py` (`Weather`, and what a forecast is) and `hsl.py` (`Transit`, and what a departure is, with the placeholder departures). `Sources` (in `sources/__init__.py`) makes them once per process and is what the commands, the refresher, the request handler and `scene()` are handed. `periodic.py` is what a source refreshed every so many minutes shares (`Weather` now; spot prices and others next): the interval, keeping the last good answer, retrying sooner after a failure, the disk cache. `glance/upstream.py`: how every source reads an answer; a test fails if a source opens a connection any other way.
 - `glance/schedule.py`: wake times, the moment an image is drawn for, images drawn ahead (`Prerendered`) and shared (`Recent`).
 - `glance/config.py`: `config.toml` and `config.local.toml`, checked at load.
 - `glance/layout.py`, `glance/decks.py`, `glance/widgets/`: screens, decks, widget types.
-- `glance/render.py`, `glance/draw.py`, `glance/scene.py`, `glance/icons.py`, `glance/i18n.py`: drawing. `draw.py` imports nothing of ours but `icons`, so widgets can use it without import cycles.
-- `glance/battery.py`, `glance/departures.py`: the battery level; the departure data model and placeholder departures.
+- `glance/render.py`, `glance/draw.py`, `glance/scene.py`, `glance/i18n.py`: drawing. `draw.py` imports nothing of ours, so widgets can use it without import cycles; it also holds the pen small icons are drawn with (`Pen`).
+- `glance/battery.py`: the battery level.
 - `deploy/`, `tools/` (icons, screenshot), `tests/`.
 
 ## Data
@@ -79,7 +79,7 @@ Both clients were verified against the live APIs; `tests/data/` has a real answe
 
 - A screen (`[screens.<name>] grid`) is a picture of widget names, like CSS `grid-template-areas`: words per line are columns, lines are rows, each name fills a rectangle, `.` is empty. Cells share the 800×450 px below the status bar equally (`Layout.rect`).
 - A widget (`[widgets.<name>]`) has a `type`, named for its look. The type knows its data provider, so the config never names one. The types are `fmi_weather_now`, `fmi_weather_hourly` and `hsl_stops`.
-- Each type is one module in `glance/widgets/` holding everything about it: `TYPE`, `SETTINGS`, `parse()`, its fill rule and `draw()`. `widgets/__init__.py` lists them by hand; adding a type is a module and a line there. Shared drawing goes in `draw.py`, never in another widget's module. A widget never fetches: its data comes from a source in `glance/sources/` through the scene, and a new provider is a new module there (`Periodic` if it is refreshed on an interval), a field in `Sources` (and in its `periodic` list), and a field in `Scene` with its line in `scene()`.
+- Each type is one module in `glance/widgets/` holding everything about it: `TYPE`, `SETTINGS`, `parse()`, its fill rule and `draw()`. `widgets/__init__.py` lists them by hand; adding a type is a module and a line there. Drawing every widget can use goes in `draw.py`, never in another widget's module. Pictures one widget draws stay in its module (HSL's mode pictograms in `hsl_stops.py`, the wind arrow in `fmi_weather_now.py`); pictures a family of widgets shares get a module named for them (`fmi_symbols.py`, for the two FMI weather widgets). A widget never fetches: its data comes from a source in `glance/sources/` through the scene, and a new provider is a new module there (`Periodic` if it is refreshed on an interval), a field in `Sources` (and in its `periodic` list), and a field in `Scene` with its line in `scene()`.
 - Widgets fill their rectangle: as many hourly columns as fit at 41 px, as many departure rows as fit at 32 px. Current weather keeps its one design, at the top left of a bigger area.
 - Minimum sizes are in pixels, since the same cells are a different size in another grid (`MIN_SIZE`: current weather 245×140, hourly 139×130, stops 200×72). They were chosen by drawing worst-case data. A grid that gives a widget less fails at load, saying what to change ("give it 3 columns"). `WidgetSizeTest` draws every type with worst-case data at several sizes and fails if anything lands outside its rectangle.
 - A deck (`[decks.<name>]`) is an ordered list of screens with a `start`; without decks, all screens form one. The schedule picks the deck. `decks.Selection` (in memory, shared by the device and the preview) keeps the showing screen across wakes, and starts over only when the schedule switches decks or the server restarts.
@@ -105,7 +105,7 @@ Design rules learned on the panel:
 
 Icons and fonts:
 
-- Weather icons are FMI's own WeatherSymbol3 symbols, adapted for four greys by `tools/build_fmi_icons.py` (thicker outlines, a grey sun, black lightning and snowflakes) and committed as PNGs at 76 and 36 px, so the Pi never renders SVG. The hand-drawn icons in `icons.py` are only the fallback for a code without a PNG.
+- Weather icons are FMI's own WeatherSymbol3 symbols, adapted for four greys by `tools/build_fmi_icons.py` (thicker outlines, a grey sun, black lightning and snowflakes) and committed as PNGs at 76 and 36 px, so the Pi never renders SVG. The hand-drawn symbols in `widgets/fmi_symbols.py` are only the fallback for a code without a PNG.
 - Stop headers use HSL's mode pictograms, cropped and scaled to 28 px by `tools/build_hsl_icons.py` (about the most the header fits).
 - Both tools render with macOS Quick Look (always at 304 px, since smaller thumbnails come out at the wrong scale; ImageMagick lost the outlines) and fetch a missing source from a pinned commit.
 - Fonts: bundled Inter 4.1.

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 
 from .sources import fmi
-from .departures import StopDepartures
+from .sources.hsl import StopDepartures
 
 
 @dataclass(frozen=True)

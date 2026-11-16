@@ -7,9 +7,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from glance import battery, config, decks, departures, draw, i18n, icons, layout, render, schedule, widgets
+from glance import battery, config, decks, draw, i18n, layout, render, schedule, widgets
 from glance.sources import fmi, hsl
-from glance.widgets import fmi_weather_hourly, hsl_stops
+from glance.widgets import fmi_symbols, fmi_weather_hourly, hsl_stops
 
 DATA = Path(__file__).parent / "data"
 HELSINKI = ZoneInfo("Europe/Helsinki")
@@ -150,14 +150,14 @@ class FMITest(unittest.TestCase):
     def test_fmi_icons_cover_every_code(self):
         for code in fmi.SYMBOLS:
             for size in (76, 36):
-                icon = icons.fmi_symbol(code, size)
+                icon = fmi_symbols.fmi_symbol(code, size)
                 self.assertIsNotNone(icon, (code, size))
                 self.assertEqual((icon.mode, icon.size), ("L", (size, size)))
-        self.assertIsNone(icons.fmi_symbol(None, 76))
-        self.assertIsNone(icons.fmi_symbol(999, 76))
+        self.assertIsNone(fmi_symbols.fmi_symbol(None, 76))
+        self.assertIsNone(fmi_symbols.fmi_symbol(999, 76))
         # Without a pre-rendered PNG, the hand-drawn icon is used.
-        self.assertEqual(draw.weather_icon(999, "rain", 2, 50).size, (50, 50))
-        self.assertTrue((icons.FMI_DIR / "LICENSE").exists())
+        self.assertEqual(fmi_symbols.weather_icon(999, "rain", 2, 50).size, (50, 50))
+        self.assertTrue((fmi_symbols.FMI_DIR / "LICENSE").exists())
 
     def test_symbols(self):
         self.assertEqual(fmi.symbol_info(31, "fi"), ("rain", 1, "Heikkoa vesisadetta"))
@@ -276,8 +276,8 @@ class HSLTest(unittest.TestCase):
                 hsl.fetch(query, "key", "fi")
 
     def test_mode_icon_names_are_limited(self):
-        self.assertIsNone(icons.mode_icon("../fmi/36/1"))
-        self.assertIsNone(icons.mode_icon("airplane"))
+        self.assertIsNone(hsl_stops.mode_icon("../fmi/36/1"))
+        self.assertIsNone(hsl_stops.mode_icon("airplane"))
 
     def test_one_route_is_not_its_characters(self):
         self.assertEqual(hsl_stops.parse({"routes": "550"}).routes, frozenset({"550"}))
@@ -333,18 +333,18 @@ class HSLTest(unittest.TestCase):
         data = {"stops": [{"gtfsId": "HSL:1", "vehicleMode": "TRAM"}, {"gtfsId": "HSL:2", "vehicleMode": None},
                           {"gtfsId": "HSL:3", "vehicleMode": "BUS"}, None]}
         self.assertEqual(hsl.parse_stop_modes(data), {"HSL:1": "tram", "HSL:3": "bus"})
-        self.assertEqual(departures.ordered_modes(["bus", "tram", "bus", "hovercraft"]), ("tram", "bus", "hovercraft"))
+        self.assertEqual(hsl.ordered_modes(["bus", "tram", "bus", "hovercraft"]), ("tram", "bus", "hovercraft"))
 
     def test_mode_icons(self):
         for mode in ("tram", "bus", "subway", "rail", "ferry"):
-            icon = icons.mode_icon(mode)
+            icon = hsl_stops.mode_icon(mode)
             self.assertIsNotNone(icon, mode)
-            self.assertEqual(icon.size, (icons.MODE_ICON_SIZE, icons.MODE_ICON_SIZE))
-        self.assertIsNone(icons.mode_icon("hovercraft"))
+            self.assertEqual(icon.size, (hsl_stops.MODE_ICON_SIZE, hsl_stops.MODE_ICON_SIZE))
+        self.assertIsNone(hsl_stops.mode_icon("hovercraft"))
         for name in ("COPYING", "LICENSE-EUPL.txt", "README"):
-            self.assertTrue((icons.HSL_DIR / name).exists(), name)
+            self.assertTrue((hsl_stops.HSL_DIR / name).exists(), name)
         now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
-        self.assertEqual(departures.placeholder("X", 1, now).modes, ("bus",))
+        self.assertEqual(hsl.placeholder("X", 1, now).modes, ("bus",))
 
     def test_select_merges_and_filters(self):
         by_stop = hsl.parse_departures(self.DATA)
@@ -357,7 +357,7 @@ class HSLTest(unittest.TestCase):
         now = datetime(2026, 11, 9, 23, 30, 50, tzinfo=HELSINKI)
         deps = hsl.select(hsl.parse_departures(self.DATA), hsl.StopQuery(("HSL:1", "HSL:2")))
         self.assertEqual([d.minutes(now) for d in deps], [5, 9, 19, 34])
-        stop = departures.StopDepartures("X", deps)
+        stop = hsl.StopDepartures("X", deps)
         self.assertEqual(len(stop.upcoming(now + timedelta(minutes=5, seconds=20), 8)), 4)  # 10 s past: kept
         self.assertEqual(len(stop.upcoming(now + timedelta(minutes=6), 8)), 3)
 
@@ -667,9 +667,9 @@ class WidgetSizeTest(unittest.TestCase):
             ("10", "Kirurginen sairaala, Kaivopuisto", 59 * 60, True, "tram", False),  # "59 min"
             ("I", "Tikkurila-Lentoasema-Huopalahti", 23 * 60, False, "rail", False),
         ] * 8
-        deps = sorted((departures.Departure(r, h, now + timedelta(seconds=t), rt, m, tr) for r, h, t, rt, m, tr in rows),
+        deps = sorted((hsl.Departure(r, h, now + timedelta(seconds=t), rt, m, tr) for r, h, t, rt, m, tr in rows),
                       key=lambda d: d.time)
-        stop = departures.StopDepartures("Itäkeskus(M) Kauppakeskus Itis, laituri 12", deps, ("subway", "rail", "tram"))
+        stop = hsl.StopDepartures("Itäkeskus(M) Kauppakeskus Itis, laituri 12", deps, ("subway", "rail", "tram"))
         return render.Scene(now=now, language=language, forecast=fmi.Forecast(now, hours),
                             weather_stale_after=timedelta(minutes=45), stops={"w": stop}, departure_clock=clock)
 
@@ -691,7 +691,7 @@ class WidgetSizeTest(unittest.TestCase):
                 for language in ("en", "fi"):
                     for clock in (False, True):
                         sc = self.worst_case(language, clock)
-                        for case in (sc, replace(sc, forecast=None, stops={"w": departures.StopDepartures("—", [])})):
+                        for case in (sc, replace(sc, forecast=None, stops={"w": hsl.StopDepartures("—", [])})):
                             with self.subTest(widget=type(widget).__name__, size=size, language=language, clock=clock):
                                 self.assertIsNone(self.drawn_outside(widget, size, case))
 
@@ -763,7 +763,7 @@ class RenderTest(unittest.TestCase):
             language="en",
             forecast=fmi.Forecast(self.now - timedelta(minutes=5), hours),
             weather_stale_after=timedelta(minutes=45),
-            stops={w: departures.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.stops, "ABC"))},
+            stops={w: hsl.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.stops, "ABC"))},
         )
 
     def assert_panel_image(self, img):
@@ -795,7 +795,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(img.crop((0, 0, 800, 30)).tobytes(), whole.crop((0, 0, 800, 30)).tobytes())
 
     def test_render_without_data(self):
-        sc = replace(self.scene, forecast=None, stops={"trams": departures.StopDepartures("Empty", [])})
+        sc = replace(self.scene, forecast=None, stops={"trams": hsl.StopDepartures("Empty", [])})
         self.assert_panel_image(render.render(self.cfg, sc))
 
     def test_status_text(self):
@@ -837,7 +837,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(render.to_g2(tiny), bytes([0x1B, 0xE4]))
 
     def test_departure_clock_times(self):
-        stop = departures.placeholder("A", 0, self.now)
+        stop = hsl.placeholder("A", 0, self.now)
         dep = stop.departures[1]  # 3 minutes from now
         minutes = hsl_stops.minutes_text(dep, self.scene)
         clock = hsl_stops.minutes_text(dep, replace(self.scene, departure_clock=True))
@@ -1300,7 +1300,7 @@ class TransitTest(unittest.TestCase):
         from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("", ("H0001",))])
         transit = Transit(cfg)
-        dep = departures.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
+        dep = hsl.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
         now = datetime.now(HELSINKI)
 
         def shown():
@@ -1331,7 +1331,7 @@ class TransitTest(unittest.TestCase):
         from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
-        dep = departures.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
+        dep = hsl.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
         with mock.patch.object(hsl, "fetch", return_value=({"HSL:1": [dep]}, {"HSL:1": "Stop"}, {})):
             transit.refresh()
         fetched_at = transit.fetched_at

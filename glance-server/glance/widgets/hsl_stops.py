@@ -5,15 +5,17 @@ fetched for all stop widgets at once by the server's Transit."""
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
+from pathlib import Path
 from typing import ClassVar
 
 from PIL import Image, ImageDraw
 
-from .. import i18n, icons
-from ..departures import Departure
+from .. import i18n
 from ..draw import BLACK, DARK, LIGHT, WHITE, font, fit_text, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
+from ..sources.hsl import MODE_ORDER, Departure
 
 TYPE = "hsl_stops"
 SETTINGS = {"name", "codes", "code", "ids", "id", "routes"}  # besides `type`
@@ -77,7 +79,7 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
     # Header: HSL's pictogram for each vehicle mode served, then the name.
     x, cy = x0 + pad, y0 + 16
     for mode in stop.modes:
-        icon = icons.mode_icon(mode)
+        icon = mode_icon(mode)
         if icon:
             paste_icon(img, icon, x, round(cy - icon.height / 2))
             x += icon.width + 4
@@ -132,3 +134,24 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
         dx = bx + badge_w + 8
         f, dest = fit_text(dep.headsign, "medium", 16, 13, minutes_left - 8 - dx)
         text_vcenter(d, dx, cy, dest, f, BLACK)
+
+
+# --- HSL's mode pictograms ---------------------------------------------------
+
+HSL_DIR = Path(__file__).resolve().parent.parent.parent / "icons" / "hsl"
+MODE_ICON_SIZE = 28
+
+
+@lru_cache(maxsize=None)
+def mode_icon(mode: str) -> Image.Image | None:
+    """HSL's pictogram for a vehicle mode ("tram", "bus", "subway", "rail", "ferry"), if any.
+
+    Pre-rendered by tools/build_hsl_icons.py.
+    """
+    if mode not in MODE_ORDER:  # the name comes from the API: only ever open our own icons
+        return None
+    path = HSL_DIR / str(MODE_ICON_SIZE) / f"{mode}.png"
+    if not path.exists():
+        return None
+    with Image.open(path) as im:
+        return im.convert("L")
