@@ -8,6 +8,9 @@ left of a deadline for the whole answer, and the body is read in pieces up to
 a size limit. Redirects are refused: neither provider uses them, and urllib
 would send the request's headers (the Digitransit key) on to wherever one
 pointed, plain HTTP included.
+
+Not covered: connecting gets what is left of the deadline once per address
+tried, and looking up the name is not limited at all.
 """
 
 from __future__ import annotations
@@ -81,9 +84,9 @@ def _with_deadline(connection: type[http.client.HTTPConnection], end: float) -> 
 class _Deadlines(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
     """Opens connections that keep to the request's `deadline_end`."""
 
-    def __init__(self):
+    def __init__(self, context=None):
         urllib.request.HTTPHandler.__init__(self)
-        urllib.request.HTTPSHandler.__init__(self)
+        urllib.request.HTTPSHandler.__init__(self, context=context)
 
     def http_open(self, req):
         return self.do_open(_with_deadline(http.client.HTTPConnection, req.deadline_end), req)
@@ -93,8 +96,7 @@ class _Deadlines(urllib.request.HTTPHandler, urllib.request.HTTPSHandler):
                             context=self._context)
 
 
-HANDLERS = (_NoRedirects, _Deadlines)
-_opener = urllib.request.build_opener(*HANDLERS)
+_opener = urllib.request.build_opener(_NoRedirects, _Deadlines)
 
 
 def _open(req: urllib.request.Request, timeout: float):
@@ -120,10 +122,10 @@ def read(req: urllib.request.Request, timeout: float, deadline: float, max_bytes
     """The body of the answer to `req`.
 
     timeout: seconds for each step (connecting, each read); deadline: seconds
-    for the whole answer, headers included, counted from the start of the
-    request. Raises what
-    urllib does (HTTPError, other OSErrors, http.client.HTTPException), plus
-    TimeoutError and OSError for the two limits.
+    for reading the whole answer, headers included, counted from the start of
+    the request. Raises what urllib does (HTTPError, other OSErrors,
+    http.client.HTTPException), plus TimeoutError and OSError for the two
+    limits.
     """
     end = time.monotonic() + deadline
     req.deadline_end = end

@@ -36,6 +36,11 @@ class Periodic(Generic[T]):
         self.last_failed = False
         self.lock = threading.Lock()
 
+    @property
+    def fetched_at(self) -> datetime | None:
+        value = self.value
+        return self._fetched_at(value) if value is not None else None
+
     def refresh(self, force: bool = False) -> None:
         now, tick = datetime.now(UTC), time.monotonic()
         with self.lock:

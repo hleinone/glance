@@ -446,6 +446,8 @@ class SourcesTest(unittest.TestCase):
 class UpstreamTest(unittest.TestCase):
     """The limits on reading a provider's answer, against a server of our own."""
 
+    tls = False
+
     def setUp(self):
         import threading, time
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -487,19 +489,28 @@ class UpstreamTest(unittest.TestCase):
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        if self.tls:
+            import ssl
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(DATA / "localhost.pem")
+            self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
 
     def read(self, path, **limits):
+        import ssl
         import urllib.request
         from unittest import mock
         from glance import upstream
         # As upstream's own opener, but never through a proxy from this
-        # machine's environment (http_proxy), which can't reach this server.
-        direct = urllib.request.build_opener(*upstream.HANDLERS, urllib.request.ProxyHandler({}))
+        # machine's environment (http_proxy), which can't reach this server,
+        # and trusting the test certificate.
+        handlers = upstream._NoRedirects, upstream._Deadlines(ssl.create_default_context(cafile=DATA / "localhost.pem"))
+        direct = urllib.request.build_opener(*handlers, urllib.request.ProxyHandler({}))
         self.enterContext(mock.patch.object(upstream, "_opener", direct))
-        req = urllib.request.Request(f"http://127.0.0.1:{self.server.server_address[1]}{path}",
+        scheme = "https" if self.tls else "http"
+        req = urllib.request.Request(f"{scheme}://127.0.0.1:{self.server.server_address[1]}{path}",
                                      headers={"digitransit-subscription-key": "secret"})
         return upstream.read(req, **{"timeout": 2, "deadline": 5, **limits})
 
@@ -538,6 +549,12 @@ class UpstreamTest(unittest.TestCase):
             self.read("/redirect")
         self.assertEqual(refused.exception.code, 302)
         self.assertEqual(self.seen, [("/redirect", "secret")])
+
+
+class UpstreamTLSTest(UpstreamTest):
+    """The same limits over HTTPS, as both providers are reached."""
+
+    tls = True
 
 
 class LayoutTest(unittest.TestCase):
@@ -1366,6 +1383,39 @@ class TransitTest(unittest.TestCase):
         self.assertIn("1:00:", logs.output[0])  # says how old the forecast it kept is
         self.assertEqual(fmi.load_cache(cfg.cache_dir / "forecast.json"), good)
 
+    def test_fresh_cached_forecast_is_not_fetched_again(self):
+        from unittest import mock
+        from glance.sources.fmi import Weather
+        cfg = isolated_config(self)
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        fmi.save_cache(fmi.Forecast(datetime.now(UTC) - timedelta(minutes=1), hours), cfg.cache_dir / "forecast.json")
+        weather = Weather(cfg)  # a restart, with a forecast fetched a minute ago
+        with mock.patch.object(fmi, "fetch", return_value=fmi.Forecast(datetime.now(UTC), hours)) as fetch:
+            weather.refresh()
+        self.assertEqual(fetch.call_count, 0)
+
+    def test_cached_forecast_without_a_new_parameter_is_fetched_at_once(self):
+        from unittest import mock
+        from glance.sources.fmi import Weather
+        cfg = isolated_config(self)
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        old = fmi.Forecast(datetime.now(UTC) - timedelta(minutes=1), hours, parameters=("Temperature",))
+        fmi.save_cache(old, cfg.cache_dir / "forecast.json")
+        weather = Weather(cfg)
+        with mock.patch.object(fmi, "fetch", return_value=fmi.Forecast(datetime.now(UTC), hours)) as fetch:
+            weather.refresh()
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_new_weather_counts_as_new_data_for_drawing(self):
+        from glance.sources import Sources
+        cfg = isolated_config(self)
+        sources = Sources.make(cfg)
+        before = sources.data_times()
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        sources.weather.forecast = fmi.Forecast(datetime.now(UTC), hours)
+        self.assertNotEqual(sources.data_times(), before)  # so a drawing shared for a few seconds is redrawn
+        self.assertIn(sources.weather, sources.periodic)  # and the refresher refreshes it
+
     def test_renumbered_stop_is_looked_up_again(self):
         from unittest import mock
         from glance.sources.hsl import Transit
@@ -1404,14 +1454,13 @@ class ServerTest(unittest.TestCase):
         import threading
         from http.server import ThreadingHTTPServer
         from glance.__main__ import make_handler
-        from glance.sources.hsl import Transit
-        from glance.sources.fmi import Weather
+        from glance.sources import Sources
         # No key: placeholder departures, no network.
         cfg = isolated_config(self)
         self.battery = battery.Battery()
         self.prerendered = schedule.Prerendered()
         self.server = ThreadingHTTPServer(
-            ("127.0.0.1", 0), make_handler(cfg, Weather(cfg), Transit(cfg), self.prerendered, self.battery)
+            ("127.0.0.1", 0), make_handler(cfg, Sources.make(cfg), self.prerendered, self.battery)
         )
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"

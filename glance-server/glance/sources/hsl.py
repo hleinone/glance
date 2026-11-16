@@ -382,18 +382,18 @@ class Transit:
             # without fetching. Then this caller starts its own.
             for _ in range(2):
                 with self.background_lock:
-                    fetch = self.background
-                    if fetch is None or not fetch.is_alive():
-                        fetch = threading.Thread(target=self.refresh, args=(min_age_seconds,), daemon=True)
+                    worker = self.background
+                    if worker is None or not worker.is_alive():
+                        worker = threading.Thread(target=self.refresh, args=(min_age_seconds,), daemon=True)
                         try:
-                            fetch.start()
+                            worker.start()
                         except RuntimeError as e:  # no more threads (the service's limit): draw with what we have
                             log.warning("could not start a departures fetch: %s", e)
                             return
-                        self.background = fetch
-                fetch.join(max(0.0, give_up - time.monotonic()))
+                        self.background = worker
+                worker.join(max(0.0, give_up - time.monotonic()))
                 attempt = self.last_attempt
-                if fetch.is_alive() or (attempt is not None and (
+                if worker.is_alive() or (attempt is not None and (
                         attempt >= called or time.monotonic() - attempt < min_age_seconds)):
                     return  # out of time, or there has been a fetch recent enough for this caller
             return

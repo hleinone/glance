@@ -22,19 +22,17 @@ from pathlib import Path
 
 from . import battery, decks, render, schedule
 from .config import Config, load
-from .sources import hsl
-from .sources.fmi import Weather
-from .sources.hsl import Transit
-from .sources.periodic import Periodic
+from .sources import Sources, hsl
 
 log = logging.getLogger("glance")
 
 
 def scene(
-    cfg: Config, weather: Weather, transit: Transit, now: datetime | None = None,
+    cfg: Config, sources: Sources, now: datetime | None = None,
     device_battery: battery.Battery | None = None, interval_minutes: int = 1,
 ) -> render.Scene:
     now = now or datetime.now(cfg.tz)
+    weather, transit = sources.weather, sources.transit
     return render.Scene(
         now=now,
         language=cfg.language,
@@ -50,13 +48,14 @@ def scene(
 
 
 def cmd_render(cfg: Config, args: argparse.Namespace) -> None:
-    weather, transit = Weather(cfg), Transit(cfg)
+    sources = Sources.make(cfg)
     if not args.offline:
-        weather.refresh(force=True)
-        transit.refresh()
+        for source in sources.periodic:
+            source.refresh(force=True)
+        sources.transit.refresh()
     if args.screen and args.screen not in cfg.screens:
         raise SystemExit(f"no screen {args.screen!r}; the screens are: {', '.join(cfg.screens)}")
-    sc = scene(cfg, weather, transit)
+    sc = scene(cfg, sources)
     img = render.render(cfg, sc, args.screen, cfg.deck_at(sc.now))
     Path(args.output).write_bytes(render.to_png(img))
     print(f"wrote {args.output}")
@@ -224,13 +223,14 @@ def log_safe(text: str) -> str:
 
 
 def make_handler(
-    cfg: Config, weather: Weather, transit: Transit, prerendered: schedule.Prerendered | None = None,
+    cfg: Config, sources: Sources, prerendered: schedule.Prerendered | None = None,
     device_battery: battery.Battery | None = None, selection: decks.Selection | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     prerendered = prerendered or schedule.Prerendered()
     device_battery = device_battery or battery.Battery()
     selection = selection or decks.Selection()
     recent = schedule.Recent()
+    transit = sources.transit
 
     class Handler(BaseHTTPRequestHandler):
         # A request must arrive within this many seconds of connecting (see
@@ -281,8 +281,9 @@ def make_handler(
                     device_battery.report((query.get("battery_mv") or [None])[0], datetime.now(cfg.tz))
                 if refresh:
                     # Button press on the device: fresh departures, rate-limited.
-                    # (Weather is left to the refresher, which checks it every
-                    # minute; fetching it here could keep the device waiting.)
+                    # (Interval sources such as the weather are left to the
+                    # refresher, which checks them every minute; fetching them
+                    # here could keep the device waiting.)
                     transit.refresh(cfg.departures_min_refresh_seconds, wait_seconds=UPSTREAM_WAIT)
                 plan = schedule.plan(datetime.now(cfg.tz), cfg.wake_schedule, cfg.wake_offset_seconds)
                 planned_at = time.monotonic()
@@ -308,15 +309,14 @@ def make_handler(
                     # while, since polling follows the device's schedule.
                     if not refresh:  # a refresh has just asked, and waited, once already
                         transit.refresh(60, wait_seconds=UPSTREAM_WAIT)
-                    forecast = weather.forecast
                     # Drawn one at a time and shared for a few seconds (see
                     # schedule.Recent), unless the minute or the data changed.
                     key = (
                         plan.display_time.replace(second=0, microsecond=0), plan.interval_minutes, screen,
-                        transit.fetched_at, forecast.fetched_at if forecast else None,
+                        *sources.data_times(),
                     )
                     body = recent.get(key, url.path, lambda: render.render(cfg, scene(
-                        cfg, weather, transit, plan.display_time, device_battery, plan.interval_minutes,
+                        cfg, sources, plan.display_time, device_battery, plan.interval_minutes,
                     ), screen, deck, forgiving=True), encode)
                 # The device counts its sleep from when the answer arrives, so
                 # take off what the wait for departures and the drawing took.
@@ -353,8 +353,8 @@ def make_handler(
 
 
 def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
-    weather, transit = Weather(cfg), Transit(cfg)
-    periodic: tuple[Periodic, ...] = (weather,)  # sources refreshed on their own intervals
+    sources = Sources.make(cfg)
+    transit = sources.transit
     prerendered = schedule.Prerendered()
     device_battery = battery.Battery(cfg.battery_full_mv, cfg.cache_dir / "battery.csv")
     selection = decks.Selection()
@@ -370,7 +370,7 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
         transit.refresh(wait_seconds=POLL_WAIT)
         while not stop.is_set():
             # Right after a poll, so a slow answer can't delay the next one.
-            for source in periodic:
+            for source in sources.periodic:
                 try:
                     source.refresh()  # checks its own interval
                 except Exception:
@@ -391,7 +391,7 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
                 # Then its neighbours, for a button press that changes screens.
                 deck = cfg.deck_at(minute)
                 showing = selection.peek(deck)
-                sc = scene(cfg, weather, transit, minute, device_battery, interval)
+                sc = scene(cfg, sources, minute, device_battery, interval)
                 for screen in (showing, *deck.neighbours(showing)):
                     img = render.render(cfg, sc, screen, deck, forgiving=True)
                     prerendered.put(minute, screen, {path: encode(img) for path, (encode, _) in render.FORMATS.items()},
@@ -402,7 +402,7 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
             log.debug("pre-rendered %s in %.1f s", minute.strftime("%H:%M"), time.monotonic() - started)
 
     threading.Thread(target=refresher, daemon=True).start()
-    Handler = make_handler(cfg, weather, transit, prerendered, device_battery, selection)
+    Handler = make_handler(cfg, sources, prerendered, device_battery, selection)
 
     server = ThreadingHTTPServer((cfg.host, cfg.port), Handler)
     log.info("serving on http://%s:%d/ (image at /glance.png, /glance.g2)", cfg.host, cfg.port)
