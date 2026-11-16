@@ -217,7 +217,9 @@ Glance is made for a home network you trust, and should stay there:
 
 `CLAUDE.md` holds the architecture and the rules the project is worked by, and
 the `CLAUDE.md` in each folder the design decisions and measurements behind
-that part (the project was built with Claude Code). `mise run icons` rebuilds the icon PNGs
+that part (the project was built with Claude Code). `mise run hooks` in
+`glance-server/` makes every `git push` that changes the server run its tests
+first, and stops the push if one fails (once per clone). `mise run icons` rebuilds the icon PNGs
 from their SVG sources (macOS only); `mise run screenshot` re-renders the screenshot above.
 
 ## Licence

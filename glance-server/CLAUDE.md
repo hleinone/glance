@@ -141,7 +141,7 @@ Within the model in the root file. Keep them when changing the code around them.
 
 ## Tests
 
-`tests/test_glance.py`, run by `mise run test` and before every deploy. `isolated_config` gives a test `config.toml` alone, a temporary cache and no key; fetches are replaced at `upstream._open`. The suite passes with outside connections blocked, in other time zones, and with `http_proxy` or the key variable set.
+`tests/test_glance.py`, run by `mise run test`, before every deploy, and before every push that changes this folder (`../.githooks/pre-push`, on once `mise run hooks` has run in the clone; it tests a copy of each pushed commit, not the working tree). `isolated_config` gives a test `config.toml` alone, a temporary cache and no key; fetches are replaced at `upstream._open`. The suite passes with outside connections blocked, in other time zones, and with `http_proxy` or the key variable set.
 
 ## Not yet tried
 

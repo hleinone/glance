@@ -1,0 +1,55 @@
+#!/bin/sh
+# Runs the server's tests on each pushed commit that changes glance-server/,
+# and stops the push if they fail. Switched on per clone by `mise run hooks`
+# in glance-server/. The commit is tested as pushed (a copy of it, not the
+# working tree), so uncommitted changes can't make it pass or fail.
+
+set -u
+zero=0000000000000000000000000000000000000000
+top=$(git rev-parse --show-toplevel) || exit 1
+python="$top/glance-server/.venv/bin/python"
+
+to_test=""
+while read -r local_ref local_sha remote_ref remote_sha; do
+  case $local_sha in *[!0]*) ;; *) continue ;; esac  # a deleted branch: nothing to test
+  case $remote_sha in
+    *[!0]*)
+      if git cat-file -e "$remote_sha^{commit}" 2>/dev/null &&
+        [ -z "$(git diff --name-only "$remote_sha" "$local_sha" -- glance-server)" ]; then
+        continue
+      fi ;;
+  esac
+  # A new branch, or a remote commit this clone doesn't have: test it.
+  to_test="$to_test $local_sha"
+done
+
+if [ -z "$to_test" ]; then
+  echo "pre-push: no server changes in this push; the server's tests were not run." >&2
+  exit 0
+fi
+
+if [ ! -x "$python" ]; then
+  echo "pre-push: the push was stopped, because the server's Python isn't set up here." >&2
+  echo "Set it up with:  cd glance-server && mise trust && mise install && mise run setup" >&2
+  exit 1
+fi
+
+for sha in $to_test; do
+  copy=$(mktemp -d) || exit 1
+  git archive "$sha" glance-server | tar -x -C "$copy" || { rm -rf "$copy"; exit 1; }
+  echo "pre-push: running the server's tests on $(git rev-parse --short "$sha")..." >&2
+  (cd "$copy/glance-server" && PYTHONDONTWRITEBYTECODE=1 "$python" -m unittest discover -s tests) \
+    >"$copy/result.txt" 2>&1
+  status=$?
+  if [ $status -ne 0 ]; then
+    cat "$copy/result.txt" >&2
+    echo >&2
+    echo "pre-push: the server's tests failed, so the push was stopped. Failing:" >&2
+    grep -E '^(FAIL|ERROR): ' "$copy/result.txt" | sed 's/^/  /' >&2
+    echo "Run them with:  cd glance-server && mise run test" >&2
+    rm -rf "$copy"
+    exit 1
+  fi
+  tail -n 3 "$copy/result.txt" | grep -E '^(Ran|OK)' | sed 's/^/pre-push: /' >&2
+  rm -rf "$copy"
+done
