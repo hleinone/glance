@@ -33,6 +33,9 @@ def scene(
 ) -> render.Scene:
     now = now or datetime.now(cfg.tz)
     weather, transit = sources.weather, sources.transit
+    # Before the data: if a refresh lands in between, the status bar warns
+    # about data a moment older than drawn, rather than missing a warning.
+    warnings = sources.warnings(now, cfg.language)
     return render.Scene(
         now=now,
         language=cfg.language,
@@ -43,7 +46,7 @@ def scene(
         departures_stale_after=transit.stale_after,
         battery_percent=device_battery.level(now) if device_battery else None,
         departure_clock=interval_minutes > 1,
-        warnings=sources.warnings(now, cfg.language),
+        warnings=warnings,
     )
 
 

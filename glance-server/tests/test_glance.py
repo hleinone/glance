@@ -1459,6 +1459,16 @@ class TransitTest(unittest.TestCase):
         sources.weather.forecast = fmi.Forecast(now, [])
         self.assertEqual(sources.warnings(now, "en"), ("Departures unavailable",))
 
+    def test_scene_warns_at_its_own_time_and_language(self):
+        from glance.__main__ import scene
+        from glance.sources import Sources
+        cfg = isolated_config(self, language="fi", digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
+        sources = Sources.make(cfg)
+        drawn_for = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)  # an image drawn ahead, not the clock now
+        sources.weather.forecast = fmi.Forecast(drawn_for, [])
+        sources.transit.fetched_at = drawn_for - timedelta(minutes=12)
+        self.assertEqual(scene(cfg, sources, drawn_for).warnings, ("Lähdöt 12 min vanhoja",))
+
     def test_renumbered_stop_is_looked_up_again(self):
         from unittest import mock
         from glance.sources.hsl import Transit
