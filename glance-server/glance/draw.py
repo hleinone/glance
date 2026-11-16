@@ -1,5 +1,6 @@
 """Drawing pieces shared by the widgets and the status bar: the panel's four
-greys, fonts, fitting text, icons."""
+greys, fonts, fitting text, pasting icons, and a pen for drawing small icons.
+It imports nothing of ours, so every widget can use it."""
 
 from __future__ import annotations
 
@@ -9,7 +10,6 @@ from pathlib import Path
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont
 
-from . import icons
 
 FONTS = Path(__file__).resolve().parent.parent / "fonts"
 
@@ -71,11 +71,39 @@ def paste_icon(img: Image.Image, icon: Image.Image, x: int, y: int) -> None:
     img.paste(ImageChops.darker(img.crop(box), icon), box)
 
 
-def weather_icon(code: int | None, kind: str, intensity: int, size: int) -> Image.Image:
-    """FMI's symbol when one is pre-rendered for this code and size, else our own drawing."""
-    return icons.fmi_symbol(code, size) or icons.draw(kind, intensity, size)
-
-
 def quantise(img: Image.Image) -> Image.Image:
     lut = [min(LEVELS, key=lambda lv: abs(lv - v)) for v in range(256)]
     return img.point(lut)
+
+
+SS = 4  # supersampling factor
+STROKE = 0.055  # outline width, fraction of icon size
+
+
+class Pen:
+    """Draws an icon supersampled on a white square, then scales it down for
+    smooth edges; it is snapped to the four greys with the rest of the screen.
+    Geometry is in unit coordinates (0..1 of the icon size)."""
+
+    def __init__(self, size: int):
+        self.s = size * SS
+        self.img = Image.new("L", (self.s, self.s), WHITE)
+        self.d = ImageDraw.Draw(self.img)
+        self.w = max(SS, round(STROKE * self.s))
+
+    def p(self, v: float) -> float:
+        return v * self.s
+
+    def circle(self, cx, cy, r, fill):
+        s = self.p
+        self.d.ellipse((s(cx) - s(r), s(cy) - s(r), s(cx) + s(r), s(cy) + s(r)), fill=fill)
+
+    def line(self, x0, y0, x1, y1, width=None, fill=BLACK):
+        w = width or self.w
+        s = self.p
+        self.d.line((s(x0), s(y0), s(x1), s(y1)), fill=fill, width=w)
+        for x, y in ((x0, y0), (x1, y1)):  # round caps
+            self.d.ellipse((s(x) - w / 2, s(y) - w / 2, s(x) + w / 2, s(y) + w / 2), fill=fill)
+
+    def result(self, size: int) -> Image.Image:
+        return self.img.resize((size, size), Image.Resampling.LANCZOS)

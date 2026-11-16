@@ -17,6 +17,10 @@ run = "pip install --quiet --disable-pip-version-check -r requirements.txt"
 description = "Run the tests"
 run = "python -m unittest discover -s tests"
 
+[tasks.hooks]
+description = "Run the tests before every git push that changes the server (once per clone)"
+run = "git config core.hooksPath .githooks && echo 'The tests now run before each push that changes glance-server/.'"
+
 [tasks.serve]
 description = "Serve locally: preview at http://localhost:8080/"
 run = "python -m glance serve"

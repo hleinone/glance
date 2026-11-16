@@ -8,7 +8,7 @@ Maybes for later, not planned work (that's under "Next steps" in `CLAUDE.md`). I
 - Sunrise/sunset.
 - Calendar.
 - Voice assistant.
-- Other regions and sources, as new widget types: `waltti_stops` (Digitransit's Waltti region, sharing the provider and key with `hsl_stops`), `foli_stops`, `openmeteo_weather_now`. Types that look alike would share drawing helpers (departure row, route badge, hourly column) in `draw.py`, and data fetching would move out of `__main__.py` into a module per provider.
+- Other regions and sources, as new widget types: `waltti_stops` (Digitransit's Waltti region, sharing the provider and key with `hsl_stops`), `foli_stops`, `openmeteo_weather_now`. Types that look alike would share drawing helpers (departure row, route badge, hourly column) in `draw.py`.
 
 ## Layout and widgets
 

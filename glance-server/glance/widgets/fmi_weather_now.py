@@ -4,18 +4,24 @@ at the top left."""
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import timedelta
 from typing import ClassVar
 
 from PIL import Image, ImageDraw
 
-from .. import fmi, i18n, icons
-from ..draw import BLACK, DARK, font, fit_text, fmt_temp, paste_icon, text_vcenter, weather_icon
+from .. import i18n
+from ..draw import BLACK, DARK, Pen, font, fit_text, fmt_temp, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
+from .fmi_symbols import symbol_info, weather_icon
 
 TYPE = "fmi_weather_now"
+WORDS = {
+    "en": {"weather_unavailable": "Weather unavailable", "feels_like": "Feels like {temp}"},
+    "fi": {"weather_unavailable": "Säätietoja ei saatavilla", "feels_like": "Tuntuu kuin {temp}"},
+}
 SETTINGS: set[str] = set()  # besides `type`
 
 
@@ -35,11 +41,11 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
     fc = sc.forecast
     hour = fc.current(sc.now) if fc else None
     if hour is None:
-        f, text = fit_text(i18n.t(sc.language, "weather_unavailable"), "medium", 16, 12, x1 - x0 - 2 * pad)
+        f, text = fit_text(i18n.t(WORDS, sc.language, "weather_unavailable"), "medium", 16, 12, x1 - x0 - 2 * pad)
         text_vcenter(d, x0 + pad, (y0 + y1) / 2, text, f, DARK)
         return
 
-    kind, intensity, desc = fmi.symbol_info(hour.symbol, sc.language)
+    kind, intensity, desc = symbol_info(hour.symbol, sc.language)
     icon_size = 76
     paste_icon(img, weather_icon(hour.symbol, kind, intensity, icon_size), x0 + pad - 4, y0 + 8)
 
@@ -68,11 +74,31 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
     f = font("medium", 16)
     x, cy = x0 + pad, y0 + 131
     if hour.feels_like is not None:
-        text = i18n.t(sc.language, "feels_like", temp=fmt_temp(hour.feels_like))
+        text = i18n.t(WORDS, sc.language, "feels_like", temp=fmt_temp(hour.feels_like))
         text_vcenter(d, x, cy, text, f, BLACK)
         x += f.getlength(text) + 16
     if hour.wind_speed is not None:
         if hour.wind_direction is not None:
-            paste_icon(img, icons.wind_arrow(hour.wind_direction, 16), round(x), round(cy - 8))
+            paste_icon(img, wind_arrow(hour.wind_direction, 16), round(x), round(cy - 8))
             x += 20
         text_vcenter(d, x, cy, f"{round(hour.wind_speed)} m/s", f, BLACK)
+
+
+def wind_arrow(direction_from: float, size: int) -> Image.Image:
+    """Arrow pointing where the wind blows to (meteorological direction + 180°)."""
+    pen = Pen(size)
+    a = math.radians(direction_from + 180)
+    # Screen coordinates: 0° = up (north), clockwise.
+    dx, dy = math.sin(a), -math.cos(a)
+    px, py = -dy, dx
+    tip = (0.5 + dx * 0.42, 0.5 + dy * 0.42)
+    tail = (0.5 - dx * 0.38, 0.5 - dy * 0.38)
+    base = (0.5 + dx * 0.02, 0.5 + dy * 0.02)
+    pen.line(tail[0], tail[1], base[0], base[1], width=round(0.14 * pen.s))
+    head = [
+        tip,
+        (base[0] + px * 0.30 - dx * 0.08, base[1] + py * 0.30 - dy * 0.08),
+        (base[0] - px * 0.30 - dx * 0.08, base[1] - py * 0.30 - dy * 0.08),
+    ]
+    pen.d.polygon([(pen.p(x), pen.p(y)) for x, y in head], fill=BLACK)
+    return pen.result(size)

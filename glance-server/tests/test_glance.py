@@ -7,8 +7,9 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from glance import battery, config, decks, departures, draw, fmi, hsl, i18n, icons, layout, render, schedule, widgets
-from glance.widgets import fmi_weather_hourly, hsl_stops
+from glance import battery, config, decks, draw, i18n, layout, render, schedule, widgets
+from glance.sources import fmi, hsl
+from glance.widgets import fmi_symbols, fmi_weather_hourly, hsl_stops
 
 DATA = Path(__file__).parent / "data"
 HELSINKI = ZoneInfo("Europe/Helsinki")
@@ -147,21 +148,21 @@ class FMITest(unittest.TestCase):
             self.assertIsNone(fmi.load_cache(Path(d) / "missing.json"))
 
     def test_fmi_icons_cover_every_code(self):
-        for code in fmi.SYMBOLS:
+        for code in fmi_symbols.SYMBOLS:
             for size in (76, 36):
-                icon = icons.fmi_symbol(code, size)
+                icon = fmi_symbols.fmi_symbol(code, size)
                 self.assertIsNotNone(icon, (code, size))
                 self.assertEqual((icon.mode, icon.size), ("L", (size, size)))
-        self.assertIsNone(icons.fmi_symbol(None, 76))
-        self.assertIsNone(icons.fmi_symbol(999, 76))
+        self.assertIsNone(fmi_symbols.fmi_symbol(None, 76))
+        self.assertIsNone(fmi_symbols.fmi_symbol(999, 76))
         # Without a pre-rendered PNG, the hand-drawn icon is used.
-        self.assertEqual(draw.weather_icon(999, "rain", 2, 50).size, (50, 50))
-        self.assertTrue((icons.FMI_DIR / "LICENSE").exists())
+        self.assertEqual(fmi_symbols.weather_icon(999, "rain", 2, 50).size, (50, 50))
+        self.assertTrue((fmi_symbols.FMI_DIR / "LICENSE").exists())
 
     def test_symbols(self):
-        self.assertEqual(fmi.symbol_info(31, "fi"), ("rain", 1, "Heikkoa vesisadetta"))
-        self.assertEqual(fmi.symbol_info(2, "en"), ("partly_cloudy", 1, "Partly cloudy"))
-        self.assertEqual(fmi.symbol_info(999, "en")[0], "unknown")
+        self.assertEqual(fmi_symbols.symbol_info(31, "fi"), ("rain", 1, "Heikkoa vesisadetta"))
+        self.assertEqual(fmi_symbols.symbol_info(2, "en"), ("partly_cloudy", 1, "Partly cloudy"))
+        self.assertEqual(fmi_symbols.symbol_info(999, "en")[0], "unknown")
 
     def test_forecast_helpers(self):
         fc = fmi.Forecast(datetime(2026, 11, 9, 20, tzinfo=UTC), fmi.parse((DATA / "fmi_simple.xml").read_bytes()))
@@ -275,8 +276,8 @@ class HSLTest(unittest.TestCase):
                 hsl.fetch(query, "key", "fi")
 
     def test_mode_icon_names_are_limited(self):
-        self.assertIsNone(icons.mode_icon("../fmi/36/1"))
-        self.assertIsNone(icons.mode_icon("airplane"))
+        self.assertIsNone(hsl_stops.mode_icon("../fmi/36/1"))
+        self.assertIsNone(hsl_stops.mode_icon("airplane"))
 
     def test_one_route_is_not_its_characters(self):
         self.assertEqual(hsl_stops.parse({"routes": "550"}).routes, frozenset({"550"}))
@@ -332,18 +333,18 @@ class HSLTest(unittest.TestCase):
         data = {"stops": [{"gtfsId": "HSL:1", "vehicleMode": "TRAM"}, {"gtfsId": "HSL:2", "vehicleMode": None},
                           {"gtfsId": "HSL:3", "vehicleMode": "BUS"}, None]}
         self.assertEqual(hsl.parse_stop_modes(data), {"HSL:1": "tram", "HSL:3": "bus"})
-        self.assertEqual(departures.ordered_modes(["bus", "tram", "bus", "hovercraft"]), ("tram", "bus", "hovercraft"))
+        self.assertEqual(hsl.ordered_modes(["bus", "tram", "bus", "hovercraft"]), ("tram", "bus", "hovercraft"))
 
     def test_mode_icons(self):
         for mode in ("tram", "bus", "subway", "rail", "ferry"):
-            icon = icons.mode_icon(mode)
+            icon = hsl_stops.mode_icon(mode)
             self.assertIsNotNone(icon, mode)
-            self.assertEqual(icon.size, (icons.MODE_ICON_SIZE, icons.MODE_ICON_SIZE))
-        self.assertIsNone(icons.mode_icon("hovercraft"))
+            self.assertEqual(icon.size, (hsl_stops.MODE_ICON_SIZE, hsl_stops.MODE_ICON_SIZE))
+        self.assertIsNone(hsl_stops.mode_icon("hovercraft"))
         for name in ("COPYING", "LICENSE-EUPL.txt", "README"):
-            self.assertTrue((icons.HSL_DIR / name).exists(), name)
+            self.assertTrue((hsl_stops.HSL_DIR / name).exists(), name)
         now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
-        self.assertEqual(departures.placeholder("X", 1, now).modes, ("bus",))
+        self.assertEqual(hsl.placeholder("X", 1, now).modes, ("bus",))
 
     def test_select_merges_and_filters(self):
         by_stop = hsl.parse_departures(self.DATA)
@@ -356,7 +357,7 @@ class HSLTest(unittest.TestCase):
         now = datetime(2026, 11, 9, 23, 30, 50, tzinfo=HELSINKI)
         deps = hsl.select(hsl.parse_departures(self.DATA), hsl.StopQuery(("HSL:1", "HSL:2")))
         self.assertEqual([d.minutes(now) for d in deps], [5, 9, 19, 34])
-        stop = departures.StopDepartures("X", deps)
+        stop = hsl.StopDepartures("X", deps)
         self.assertEqual(len(stop.upcoming(now + timedelta(minutes=5, seconds=20), 8)), 4)  # 10 s past: kept
         self.assertEqual(len(stop.upcoming(now + timedelta(minutes=6), 8)), 3)
 
@@ -428,8 +429,24 @@ codes = "H0001"
         self.assertFalse(hsl.is_gtfs_id("H0665"))
 
 
+class SourcesTest(unittest.TestCase):
+    def test_sources_reach_the_network_only_through_upstream(self):
+        # A source that opened its own connection would skip the deadline,
+        # the size limit and the refused redirects that upstream.read keeps.
+        import re
+        sources = Path(__file__).parent.parent / "glance" / "sources"
+        direct = re.compile(r"urlopen|build_opener|HTTPS?Connection\(|\bsocket\.|\bopen_url|requests\.")
+        modules = sorted(sources.glob("*.py"))
+        self.assertIn("hsl.py", [m.name for m in modules])
+        for module in modules:
+            with self.subTest(module.name):
+                self.assertEqual(direct.findall(module.read_text()), [], "fetch through glance.upstream.read")
+
+
 class UpstreamTest(unittest.TestCase):
     """The limits on reading a provider's answer, against a server of our own."""
+
+    tls = False
 
     def setUp(self):
         import threading, time
@@ -440,6 +457,14 @@ class UpstreamTest(unittest.TestCase):
         class Provider(BaseHTTPRequestHandler):
             def do_GET(self):
                 test.seen.append((self.path, self.headers.get("digitransit-subscription-key")))
+                if self.path == "/dripping-headers":  # a byte at a time, each within any per-read timeout
+                    try:
+                        for byte in b"HTTP/1.1 200 OK\r\nX-Padding: " + b"x" * 250 + b"\r\nContent-Length: 2\r\n\r\nok":
+                            self.wfile.write(bytes([byte]))
+                            time.sleep(0.02)
+                    except OSError:
+                        pass  # the client gave up, as it should
+                    return
                 if self.path == "/redirect":
                     self.send_response(302)
                     self.send_header("Location", "/ok")
@@ -464,24 +489,40 @@ class UpstreamTest(unittest.TestCase):
                 pass
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+        if self.tls:
+            import ssl
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+            context.load_cert_chain(DATA / "localhost.pem")
+            self.server.socket = context.wrap_socket(self.server.socket, server_side=True)
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
 
     def read(self, path, **limits):
+        import ssl
         import urllib.request
         from unittest import mock
         from glance import upstream
         # As upstream's own opener, but never through a proxy from this
-        # machine's environment (http_proxy), which can't reach this server.
-        direct = urllib.request.build_opener(upstream._NoRedirects, urllib.request.ProxyHandler({}))
+        # machine's environment (http_proxy), which can't reach this server,
+        # and trusting the test certificate.
+        handlers = upstream._handlers(ssl.create_default_context(cafile=DATA / "localhost.pem"))
+        direct = urllib.request.build_opener(*handlers, urllib.request.ProxyHandler({}))
         self.enterContext(mock.patch.object(upstream, "_opener", direct))
-        req = urllib.request.Request(f"http://127.0.0.1:{self.server.server_address[1]}{path}",
+        scheme = "https" if self.tls else "http"
+        req = urllib.request.Request(f"{scheme}://127.0.0.1:{self.server.server_address[1]}{path}",
                                      headers={"digitransit-subscription-key": "secret"})
         return upstream.read(req, **{"timeout": 2, "deadline": 5, **limits})
 
     def test_reads_the_answer(self):
         self.assertEqual(self.read("/ok"), b"x" * 3000)
+
+    def test_providers_are_read_with_these_limits(self):
+        # The tests above use an opener of their own (no proxy, a trusted test
+        # certificate) built from the same handlers as the real one.
+        from glance import upstream
+        kinds = {type(h) for h in upstream._opener.handlers}
+        self.assertLessEqual({type(h) for h in upstream._handlers()}, kinds)
 
     def test_too_large(self):
         with self.assertRaisesRegex(OSError, "larger"):
@@ -493,6 +534,15 @@ class UpstreamTest(unittest.TestCase):
         with self.assertRaises(TimeoutError):
             self.read("/dripping", deadline=0.3)
         self.assertLess(time.monotonic() - started, 2)  # not the minute the whole answer would take
+
+    def test_headers_sent_too_slowly_time_out(self):
+        # The status line and headers take about 6 s to arrive, though no
+        # single read waits longer than the per-read timeout.
+        import time
+        started = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            self.read("/dripping-headers", deadline=0.3)
+        self.assertLess(time.monotonic() - started, 2)
 
     def test_cut_short(self):
         import http.client
@@ -506,6 +556,12 @@ class UpstreamTest(unittest.TestCase):
             self.read("/redirect")
         self.assertEqual(refused.exception.code, 302)
         self.assertEqual(self.seen, [("/redirect", "secret")])
+
+
+class UpstreamTLSTest(UpstreamTest):
+    """The same limits over HTTPS, as both providers are reached."""
+
+    tls = True
 
 
 class LayoutTest(unittest.TestCase):
@@ -600,8 +656,8 @@ class WidgetSizeTest(unittest.TestCase):
     def worst_case(self, language: str, clock: bool) -> render.Scene:
         """Data that takes the most room: long texts, wide temperatures, three modes."""
         now = self.NOW
-        symbol = max((s for s in range(1, 100) if fmi.symbol_info(s, language)[2]),
-                     key=lambda s: len(fmi.symbol_info(s, language)[2]))
+        symbol = max((s for s in range(1, 100) if fmi_symbols.symbol_info(s, language)[2]),
+                     key=lambda s: len(fmi_symbols.symbol_info(s, language)[2]))
         start = now.replace(minute=0, second=0, microsecond=0) - timedelta(hours=8)
         hours = [fmi.Hour(time=(start + timedelta(hours=i)).astimezone(UTC), temperature=-20.4 - (i % 2) * 8.2,
                           wind_speed=15.4, wind_direction=45.0, pop=100, symbol=symbol, feels_like=-35.4)
@@ -611,11 +667,11 @@ class WidgetSizeTest(unittest.TestCase):
             ("10", "Kirurginen sairaala, Kaivopuisto", 59 * 60, True, "tram", False),  # "59 min"
             ("I", "Tikkurila-Lentoasema-Huopalahti", 23 * 60, False, "rail", False),
         ] * 8
-        deps = sorted((departures.Departure(r, h, now + timedelta(seconds=t), rt, m, tr) for r, h, t, rt, m, tr in rows),
+        deps = sorted((hsl.Departure(r, h, now + timedelta(seconds=t), rt, m, tr) for r, h, t, rt, m, tr in rows),
                       key=lambda d: d.time)
-        stop = departures.StopDepartures("Itäkeskus(M) Kauppakeskus Itis, laituri 12", deps, ("subway", "rail", "tram"))
+        stop = hsl.StopDepartures("Itäkeskus(M) Kauppakeskus Itis, laituri 12", deps, ("subway", "rail", "tram"))
         return render.Scene(now=now, language=language, forecast=fmi.Forecast(now, hours),
-                            weather_stale_after=timedelta(minutes=45), stops={"w": stop}, departure_clock=clock)
+                            stops={"w": stop}, departure_clock=clock)
 
     def drawn_outside(self, widget, size: tuple[int, int], sc: render.Scene) -> tuple | None:
         """Bounding box of anything drawn outside the rectangle, or None."""
@@ -635,7 +691,7 @@ class WidgetSizeTest(unittest.TestCase):
                 for language in ("en", "fi"):
                     for clock in (False, True):
                         sc = self.worst_case(language, clock)
-                        for case in (sc, replace(sc, forecast=None, stops={"w": departures.StopDepartures("—", [])})):
+                        for case in (sc, replace(sc, forecast=None, stops={"w": hsl.StopDepartures("—", [])})):
                             with self.subTest(widget=type(widget).__name__, size=size, language=language, clock=clock):
                                 self.assertIsNone(self.drawn_outside(widget, size, case))
 
@@ -706,8 +762,7 @@ class RenderTest(unittest.TestCase):
             now=self.now,
             language="en",
             forecast=fmi.Forecast(self.now - timedelta(minutes=5), hours),
-            weather_stale_after=timedelta(minutes=45),
-            stops={w: departures.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.stops, "ABC"))},
+            stops={w: hsl.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.stops, "ABC"))},
         )
 
     def assert_panel_image(self, img):
@@ -739,18 +794,19 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(img.crop((0, 0, 800, 30)).tobytes(), whole.crop((0, 0, 800, 30)).tobytes())
 
     def test_render_without_data(self):
-        sc = replace(self.scene, forecast=None, stops={"trams": departures.StopDepartures("Empty", [])})
+        sc = replace(self.scene, forecast=None, stops={"trams": hsl.StopDepartures("Empty", [])})
         self.assert_panel_image(render.render(self.cfg, sc))
 
     def test_status_text(self):
         self.assertEqual(render._status_warning(self.scene), None)
         live = replace(self.scene, departures_live=True, departures_fetched_at=self.now - timedelta(minutes=12))
-        self.assertTrue(live.departures_stale)
-        self.assertEqual(render._status_warning(live), "Departures 12 min old")
+        self.assertTrue(live.departures_stale)  # so the stops draw realtime times grey
         fresh = replace(live, departures_fetched_at=self.now - timedelta(seconds=40))
         self.assertFalse(fresh.departures_stale)
-        self.assertEqual(render._status_warning(fresh), None)
-        self.assert_panel_image(render.render(self.cfg, live))
+        # The status bar shows what the sources say, then its own warning.
+        warned = replace(self.scene, warnings=("Weather 2 h old", "Departures 12 min old"), battery_percent=10)
+        self.assertEqual(render._status_warning(warned), "Weather 2 h old · Departures 12 min old · Charge battery")
+        self.assert_panel_image(render.render(self.cfg, replace(live, warnings=("Departures 12 min old",))))
 
     def test_page_dots(self):
         from PIL import ImageChops
@@ -765,7 +821,8 @@ class RenderTest(unittest.TestCase):
         second = render.render(self.cfg, self.scene, "departures", two)
         self.assertNotEqual(second.crop(box).tobytes(), dotted.crop(box).tobytes())  # the other dot filled
         # A long warning takes the room: no dots then.
-        warned = replace(self.scene, forecast=None, departures_live=True, battery_percent=10)
+        warned = replace(self.scene, forecast=None, departures_live=True, battery_percent=10,
+                         warnings=("Weather unavailable", "Departures unavailable"))
         self.assertEqual(render.render(self.cfg, warned, "home", two).tobytes(),
                          render.render(self.cfg, warned, "home").tobytes())
 
@@ -781,7 +838,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(render.to_g2(tiny), bytes([0x1B, 0xE4]))
 
     def test_departure_clock_times(self):
-        stop = departures.placeholder("A", 0, self.now)
+        stop = hsl.placeholder("A", 0, self.now)
         dep = stop.departures[1]  # 3 minutes from now
         minutes = hsl_stops.minutes_text(dep, self.scene)
         clock = hsl_stops.minutes_text(dep, replace(self.scene, departure_clock=True))
@@ -1110,7 +1167,7 @@ class BatteryTest(unittest.TestCase):
     def test_status_bar(self):
         now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
         sc = render.Scene(now=now, language="fi", forecast=fmi.Forecast(now, []),
-                          weather_stale_after=timedelta(minutes=45), stops={}, battery_percent=40)
+                          stops={}, battery_percent=40)
         self.assertIsNone(render._status_warning(sc))
         self.assertEqual(render._status_warning(replace(sc, battery_percent=15)), "Lataa akku")
         self.assertEqual(i18n.percent("fi", 87), "87\u202f%")
@@ -1120,7 +1177,7 @@ class BatteryTest(unittest.TestCase):
 class TransitTest(unittest.TestCase):
     def test_refresh_during_fetch_waits_for_it(self):
         import threading, time
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
         calls = []
@@ -1144,7 +1201,8 @@ class TransitTest(unittest.TestCase):
         # They run in the refresher thread: an exception there used to end it
         # for good, leaving the server up with no polling or pre-drawn images.
         from unittest import mock
-        from glance.__main__ import Transit, Weather
+        from glance.sources.hsl import Transit
+        from glance.sources.fmi import Weather
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         with mock.patch.object(fmi, "fetch", side_effect=RuntimeError("surprise")), \
                 mock.patch.object(hsl, "fetch", side_effect=RuntimeError("surprise")), \
@@ -1168,7 +1226,7 @@ class TransitTest(unittest.TestCase):
         # A request the device waits on (it gives up after 10 s) uses the last
         # good data if the fetch hasn't answered in time.
         import threading, time
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
         release = threading.Event()
@@ -1184,7 +1242,7 @@ class TransitTest(unittest.TestCase):
         # At the service's thread limit: draw with the last good data, don't fail the request.
         import threading
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         transit = Transit(isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))]))
         with mock.patch.object(threading.Thread, "start", side_effect=RuntimeError("can't start new thread")), \
                 self.assertLogs("glance", "WARNING"):
@@ -1194,7 +1252,7 @@ class TransitTest(unittest.TestCase):
         # A fetch that never finishes: every request used to leave a thread
         # stuck behind it, until the service's thread limit stopped the server.
         import threading
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
         release = threading.Event()
@@ -1218,7 +1276,7 @@ class TransitTest(unittest.TestCase):
         # without fetching. A button press that waited on that thread wants
         # them at most 10 s old, and must still get its fetch.
         import threading, time
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
         fetches = []
@@ -1240,10 +1298,10 @@ class TransitTest(unittest.TestCase):
         # The empty answer used to drop the stop codes as well, so the kept
         # departures couldn't be found: the widget showed its code and nothing.
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("", ("H0001",))])
         transit = Transit(cfg)
-        dep = departures.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
+        dep = hsl.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
         now = datetime.now(HELSINKI)
 
         def shown():
@@ -1271,10 +1329,10 @@ class TransitTest(unittest.TestCase):
 
     def test_answer_without_the_stops_keeps_the_last_departures(self):
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         transit = Transit(cfg)
-        dep = departures.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
+        dep = hsl.Departure("7", "Pasila", datetime.now(UTC) + timedelta(minutes=5), True, "tram")
         with mock.patch.object(hsl, "fetch", return_value=({"HSL:1": [dep]}, {"HSL:1": "Stop"}, {})):
             transit.refresh()
         fetched_at = transit.fetched_at
@@ -1289,7 +1347,7 @@ class TransitTest(unittest.TestCase):
 
     def test_clock_set_back_does_not_hold_off_fetches(self):
         from unittest import mock
-        from glance.__main__ import Weather
+        from glance.sources.fmi import Weather
         cfg = isolated_config(self)
         hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
         weather = Weather(cfg)
@@ -1300,7 +1358,7 @@ class TransitTest(unittest.TestCase):
 
     def test_failed_weather_fetch_is_retried_sooner(self):
         from unittest import mock
-        from glance.__main__ import Weather
+        from glance.sources.fmi import Weather
         weather = Weather(isolated_config(self))
         hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
         with mock.patch.object(fmi, "fetch", side_effect=fmi.FMIError("down")) as fetch, self.assertLogs("glance", "WARNING"):
@@ -1317,9 +1375,103 @@ class TransitTest(unittest.TestCase):
             weather.refresh()
             self.assertEqual(fetch.call_count, 1)
 
+    def test_failed_weather_fetch_keeps_the_last_good_forecast(self):
+        from unittest import mock
+        from glance.sources.fmi import Weather
+        cfg = isolated_config(self)
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        good = fmi.Forecast(datetime.now(UTC) - timedelta(hours=1), hours)
+        fmi.save_cache(good, cfg.cache_dir / "forecast.json")
+        weather = Weather(cfg)  # starts from the cache, an hour old
+        with mock.patch.object(fmi, "fetch", side_effect=fmi.FMIError("down")) as fetch, \
+                self.assertLogs("glance", "WARNING") as logs:
+            weather.refresh()
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(weather.forecast, good)
+        self.assertIn("1:00:", logs.output[0])  # says how old the forecast it kept is
+        self.assertEqual(fmi.load_cache(cfg.cache_dir / "forecast.json"), good)
+
+    def test_fresh_cached_forecast_is_not_fetched_again(self):
+        from unittest import mock
+        from glance.sources.fmi import Weather
+        cfg = isolated_config(self)
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        fmi.save_cache(fmi.Forecast(datetime.now(UTC) - timedelta(minutes=1), hours), cfg.cache_dir / "forecast.json")
+        weather = Weather(cfg)  # a restart, with a forecast fetched a minute ago
+        with mock.patch.object(fmi, "fetch", return_value=fmi.Forecast(datetime.now(UTC), hours)) as fetch:
+            weather.refresh()
+        self.assertEqual(fetch.call_count, 0)
+
+    def test_cached_forecast_without_a_new_parameter_is_fetched_at_once(self):
+        from unittest import mock
+        from glance.sources.fmi import Weather
+        cfg = isolated_config(self)
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        old = fmi.Forecast(datetime.now(UTC) - timedelta(minutes=1), hours, parameters=("Temperature",))
+        fmi.save_cache(old, cfg.cache_dir / "forecast.json")
+        weather = Weather(cfg)
+        with mock.patch.object(fmi, "fetch", return_value=fmi.Forecast(datetime.now(UTC), hours)) as fetch:
+            weather.refresh()
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_new_weather_counts_as_new_data_for_drawing(self):
+        from glance.sources import Sources
+        cfg = isolated_config(self)
+        sources = Sources.make(cfg)
+        before = sources.data_times()
+        hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
+        sources.weather.forecast = fmi.Forecast(datetime.now(UTC), hours)
+        self.assertNotEqual(sources.data_times(), before)  # so a drawing shared for a few seconds is redrawn
+        self.assertIn(sources.weather, sources.periodic)  # and the refresher refreshes it
+
+    def test_weather_says_when_its_forecast_is_missing_or_old(self):
+        from glance.sources.fmi import Weather
+        cfg = isolated_config(self)  # [fmi] stale_after_minutes = 45
+        weather = Weather(cfg)
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+        self.assertEqual(weather.warning(now, "en"), "Weather unavailable")
+        weather.forecast = fmi.Forecast(now - timedelta(minutes=45), [])
+        self.assertIsNone(weather.warning(now, "en"))
+        weather.forecast = fmi.Forecast(now - timedelta(hours=2), [])
+        self.assertEqual(weather.warning(now, "en"), "Weather 2 h old")
+        self.assertEqual(weather.warning(now, "fi"), "Sää 2 h vanha")
+
+    def test_departures_say_when_they_are_missing_or_old(self):
+        from glance.sources.hsl import Transit
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
+        transit = Transit(cfg)  # [digitransit] stale_after_minutes = 5
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+        self.assertEqual(transit.warning(now, "en"), "Departures unavailable")  # live, never fetched
+        transit.fetched_at = now - timedelta(minutes=12)
+        self.assertEqual(transit.warning(now, "en"), "Departures 12 min old")
+        self.assertEqual(transit.warning(now, "fi"), "Lähdöt 12 min vanhoja")
+        transit.fetched_at = now - timedelta(seconds=40)
+        self.assertIsNone(transit.warning(now, "en"))
+        placeholders = Transit(isolated_config(self))  # no key: placeholders are never old
+        self.assertIsNone(placeholders.warning(now, "en"))
+
+    def test_status_bar_lists_weather_then_departures(self):
+        from glance.sources import Sources
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
+        sources = Sources.make(cfg)
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+        self.assertEqual(sources.warnings(now, "en"), ("Weather unavailable", "Departures unavailable"))
+        sources.weather.forecast = fmi.Forecast(now, [])
+        self.assertEqual(sources.warnings(now, "en"), ("Departures unavailable",))
+
+    def test_scene_warns_at_its_own_time_and_language(self):
+        from glance.__main__ import scene
+        from glance.sources import Sources
+        cfg = isolated_config(self, language="fi", digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
+        sources = Sources.make(cfg)
+        drawn_for = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)  # an image drawn ahead, not the clock now
+        sources.weather.forecast = fmi.Forecast(drawn_for, [])
+        sources.transit.fetched_at = drawn_for - timedelta(minutes=12)
+        self.assertEqual(scene(cfg, sources, drawn_for).warnings, ("Lähdöt 12 min vanhoja",))
+
     def test_renumbered_stop_is_looked_up_again(self):
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("H0001",))])
         (cfg.cache_dir / "stop_codes.json").write_text('{"H0001": "HSL:OLD", "H0002": "HSL:ELSEWHERE"}')
         transit = Transit(cfg)
@@ -1340,7 +1492,7 @@ class TransitTest(unittest.TestCase):
 
     def test_unknown_stop_code_is_looked_up_once(self):
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("H9999",))])
         transit = Transit(cfg)
         with mock.patch.object(hsl, "resolve_code", return_value=None) as lookup, \
@@ -1354,13 +1506,14 @@ class ServerTest(unittest.TestCase):
     def setUp(self):
         import threading
         from http.server import ThreadingHTTPServer
-        from glance.__main__ import Transit, Weather, make_handler
+        from glance.__main__ import make_handler
+        from glance.sources import Sources
         # No key: placeholder departures, no network.
         cfg = isolated_config(self)
         self.battery = battery.Battery()
         self.prerendered = schedule.Prerendered()
         self.server = ThreadingHTTPServer(
-            ("127.0.0.1", 0), make_handler(cfg, Weather(cfg), Transit(cfg), self.prerendered, self.battery)
+            ("127.0.0.1", 0), make_handler(cfg, Sources.make(cfg), self.prerendered, self.battery)
         )
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
@@ -1411,7 +1564,7 @@ class ServerTest(unittest.TestCase):
     def test_changes_need_the_client_header(self):
         # What a web page elsewhere can make a browser send: a plain GET.
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         with mock.patch.object(Transit, "refresh") as refresh:
             self.get("/glance.png?refresh=1&battery_mv=2600", client=False).read()
             self.assertIsNone(self.battery.level(datetime.now(HELSINKI)))
@@ -1455,7 +1608,7 @@ class ServerTest(unittest.TestCase):
 
     def test_screen_change_uses_the_screen_drawn_ahead(self):
         from unittest import mock
-        from glance.__main__ import Transit
+        from glance.sources.hsl import Transit
         noon = datetime.now(HELSINKI).replace(hour=12, minute=0, second=40, microsecond=0)
         self.enterContext(mock.patch.object(schedule, "plan", return_value=schedule.Plan(noon, 260, 5)))
         self.prerendered.put(noon.replace(second=0), "departures", {"/glance.png": b"drawn ahead"})

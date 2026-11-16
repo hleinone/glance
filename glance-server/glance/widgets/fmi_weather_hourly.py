@@ -8,10 +8,11 @@ from typing import ClassVar
 
 from PIL import Image, ImageDraw
 
-from .. import fmi, i18n
-from ..draw import BLACK, DARK, font, fit_text, fmt_temp, paste_icon, text_vcenter, weather_icon
+from .. import i18n
+from ..draw import BLACK, DARK, font, fit_text, fmt_temp, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
+from .fmi_symbols import symbol_info, weather_icon
 
 TYPE = "fmi_weather_hourly"
 SETTINGS: set[str] = set()  # besides `type`
@@ -52,7 +53,7 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
     for i, h in enumerate(hours):
         cx = x0 + pad + col_w * (i + 0.5)
         text_vcenter(d, cx, y0 + 24, temps[i], temp_font, BLACK, "m")
-        kind, intensity, _ = fmi.symbol_info(h.symbol, sc.language)
+        kind, intensity, _ = symbol_info(h.symbol, sc.language)
         paste_icon(img, weather_icon(h.symbol, kind, intensity, icon_size), round(cx - icon_size / 2), y0 + 42)
         # Every hour, 0 % included: a gap would look like missing data.
         if h.pop is not None:

@@ -10,305 +10,55 @@ from __future__ import annotations
 import argparse
 import io
 import ipaddress
-import json
 import logging
 import re
 import socket
 import threading
 import time
 import urllib.parse
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import battery, decks, departures, fmi, hsl, render, schedule
+from . import battery, decks, render, schedule
 from .config import Config, load
+from .sources import Sources, hsl
 
 log = logging.getLogger("glance")
 
 
-class Weather:
-    """Holds the latest good forecast; refreshes at most every N minutes."""
-
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-        self.cache_path = cfg.cache_dir / "forecast.json"
-        self.forecast = fmi.load_cache(self.cache_path)
-        # time.monotonic(), not the clock: the Pi has no real-time clock, and
-        # a clock set backwards would otherwise hold off fetches until it
-        # caught up.
-        self.last_attempt: float | None = None
-        self.last_failed = False
-        self.lock = threading.Lock()
-
-    RETRY_AFTER = timedelta(minutes=2)  # after a failed fetch, instead of the full interval
-
-    def refresh(self, force: bool = False) -> None:
-        now, tick = datetime.now(UTC), time.monotonic()
-        interval = timedelta(minutes=self.cfg.weather_refresh_minutes)
-        with self.lock:
-            wait = min(interval, self.RETRY_AFTER) if self.last_failed else interval
-            if not force and self.last_attempt is not None and tick - self.last_attempt < wait.total_seconds():
-                return
-            current = self.forecast and self.forecast.parameters == fmi.PARAMETERS
-            # A cached forecast "from the future" (the clock went back) is not fresh.
-            if not force and current and timedelta(0) <= now - self.forecast.fetched_at < interval:
-                return
-            self.last_attempt = tick
-            self.last_failed = True  # until the fetch below succeeds
-        # Never raises: this runs in the refresher thread, which must survive
-        # whatever a fetch does (it once died for good on an error page).
-        try:
-            fc = fmi.fetch(self.cfg.lat, self.cfg.lon, self.cfg.tz, now)
-        except fmi.FMIError as e:
-            age = f"{(now - self.forecast.fetched_at)} old" if self.forecast else "none cached"
-            log.warning("weather fetch failed (%s); using last good forecast (%s)", e, age)
-            return
-        except Exception:
-            log.exception("weather fetch failed unexpectedly; using the last good forecast")
-            return
-        with self.lock:
-            self.forecast = fc
-            self.last_failed = False
-        try:
-            fmi.save_cache(fc, self.cache_path)
-        except OSError as e:
-            log.warning("could not save the weather cache: %s", e)
-        log.info("weather updated: %d hours", len(fc.hours))
-
-
-class Transit:
-    """Holds the latest departures for all stop widgets; refreshes every minute or so.
-
-    Departures have no disk cache: they go stale within minutes, and a restart
-    refetches. Stop codes ("H0665") are resolved to ids once and cached on disk.
-    """
-
-    def __init__(self, cfg: Config):
-        self.cfg = cfg
-        self.configured = [name for name, s in cfg.stops.items() if s.ids]
-        self.live = bool(cfg.digitransit_key and self.configured)
-        if not cfg.digitransit_key:
-            log.info("no Digitransit key configured: showing placeholder departures")
-        elif not self.configured:
-            log.info("no stop codes configured: showing placeholder departures")
-        self.codes_path = cfg.cache_dir / "stop_codes.json"
-        self.code_ids: dict[str, str] = self._load_codes()
-        self.unknown_codes: set[str] = set()  # looked up and not found: not asked again until a restart
-        self.rechecked_codes: set[str] = set()  # cached ids that HSL no longer knew, looked up again once
-        self.stale_codes: set[str] = set()  # of those, the ones still waiting for their new lookup
-        self.by_stop: dict[str, list[departures.Departure]] = {}
-        self.names: dict[str, str] = {}  # gtfsId -> HSL's stop name
-        self.modes: dict[str, str] = {}  # gtfsId -> vehicle mode ("tram", "bus", ...)
-        self.fetched_at: datetime | None = None
-        self.last_attempt: float | None = None  # time.monotonic(), like Weather's
-        self.lock = threading.Lock()  # guards by_stop, names, modes, fetched_at
-        self.fetch_lock = threading.Lock()
-        # The one thread fetching for callers that wait only so long (see refresh).
-        self.background: threading.Thread | None = None
-        self.background_lock = threading.Lock()
-
-    def _load_codes(self) -> dict[str, str]:
-        try:
-            return json.loads(self.codes_path.read_text())
-        except FileNotFoundError:
-            return {}
-        except ValueError:
-            log.warning("ignoring unreadable %s", self.codes_path)
-            return {}
-
-    def _resolve_codes(self) -> None:
-        codes = {
-            ref.upper() for s in self.cfg.stops.values() for ref in s.ids
-            if not hsl.is_gtfs_id(ref) and ref.upper() not in self.code_ids and ref.upper() not in self.unknown_codes
-        } | self.stale_codes
-        if not codes:
-            return
-        for code in sorted(codes):
-            try:
-                stop_id = hsl.resolve_code(code, self.cfg.digitransit_key)
-            except hsl.HSLError as e:
-                log.warning("could not look up stop code %s (%s); will retry", code, e)
-                continue
-            self.stale_codes.discard(code)
-            if stop_id:
-                log.info("stop code %s is %s", code, stop_id)
-                self.code_ids[code] = stop_id
-            elif code in self.code_ids:
-                # A code HSL knew before and has no stop for now: the id it
-                # had stays (its departures, if any, are still the best there is).
-                log.warning("stop code %s is no longer known to HSL; keeping %s", code, self.code_ids[code])
-            else:
-                log.warning("unknown stop code %s (check it on the stop sign or reittiopas)", code)
-                self.unknown_codes.add(code)
-        try:
-            self.codes_path.parent.mkdir(parents=True, exist_ok=True)
-            self.codes_path.write_text(json.dumps(self.code_ids, indent=1, sort_keys=True))
-        except OSError as e:
-            log.warning("could not save the stop codes: %s", e)
-
-    def _query(self, name: str) -> hsl.StopQuery:
-        stop = self.cfg.stops[name]
-        # .get, not a check and then a lookup: the fetch thread changes
-        # code_ids while requests read it.
-        found = (ref if hsl.is_gtfs_id(ref) else self.code_ids.get(ref.upper()) for ref in stop.ids)
-        return hsl.StopQuery(tuple(sid for sid in found if sid), stop.routes)
-
-    def refresh(self, min_age_seconds: float = 0, wait_seconds: float | None = None) -> None:
-        """Fetch now, unless the last attempt was less than min_age_seconds ago.
-
-        Scheduled polls run just before each minute boundary (see the server's
-        refresher); a button press on the device asks for one more.
-
-        wait_seconds: return after this long even if the fetch is still
-        running (it carries on in the background and its result is used by
-        later requests). For requests the device is waiting on: it gives up
-        after 10 s, so the last good data in time beats fresh data too late.
-        """
-        if not self.live:
-            return
-        if wait_seconds is not None:
-            # One background thread for everyone who waits: while it runs,
-            # later callers wait on it too instead of starting their own. A
-            # thread each meant that a fetch which never finished collected
-            # one stuck thread per request, up to the service's limit, after
-            # which the server could answer nobody.
-            called, give_up = time.monotonic(), time.monotonic() + wait_seconds
-            # Twice at most: the thread found running may have been started
-            # for a caller content with older data (a plain request takes
-            # departures up to a minute old, a button press 10 s) and ended
-            # without fetching. Then this caller starts its own.
-            for _ in range(2):
-                with self.background_lock:
-                    fetch = self.background
-                    if fetch is None or not fetch.is_alive():
-                        fetch = threading.Thread(target=self.refresh, args=(min_age_seconds,), daemon=True)
-                        try:
-                            fetch.start()
-                        except RuntimeError as e:  # no more threads (the service's limit): draw with what we have
-                            log.warning("could not start a departures fetch: %s", e)
-                            return
-                        self.background = fetch
-                fetch.join(max(0.0, give_up - time.monotonic()))
-                attempt = self.last_attempt
-                if fetch.is_alive() or (attempt is not None and (
-                        attempt >= called or time.monotonic() - attempt < min_age_seconds)):
-                    return  # out of time, or there has been a fetch recent enough for this caller
-            return
-        # One fetch at a time. A refresh that arrives during a fetch (e.g. a
-        # button press right after startup) waits for it, then finds it recent
-        # and uses its result, instead of skipping and drawing with no data.
-        with self.fetch_lock:
-            tick = time.monotonic()
-            if self.last_attempt is not None and tick - self.last_attempt < min_age_seconds:
-                return
-            self.last_attempt = tick
-            self._fetch(datetime.now(UTC))
-
-    def _fetch(self, now: datetime) -> None:
-        # Never raises, like Weather.refresh: the refresher thread must survive.
-        try:
-            self._resolve_codes()
-            queries = [self._query(name) for name in self.configured]
-            by_stop, names, modes = hsl.fetch(queries, self.cfg.digitransit_key, self.cfg.language)
-        except hsl.HSLError as e:
-            log.warning("departures fetch failed (%s); keeping last good data from %s", e, self.fetched_at)
-            return
-        except Exception:
-            log.exception("departures fetch failed unexpectedly; keeping last good data from %s", self.fetched_at)
-            return
-        asked = {sid for q in queries for sid in q.ids}
-        if not asked:
-            # No stop could be asked for (its codes not looked up yet, or not
-            # known to HSL): no answer, so nothing to show as fresh. The
-            # status bar says departures are unavailable; the log says why.
-            log.debug("no departures fetched: none of the stop codes is known yet")
-            return
-        if not asked & by_stop.keys():
-            # An answer with none of the stops in it (empty data during an
-            # outage at their end, say) is a failed fetch, not "no departures":
-            # the last good ones stay, and the status bar says how old they are.
-            log.warning("departures fetch failed (the answer had none of the stops asked for); "
-                        "keeping last good data from %s", self.fetched_at)
-            self._recheck_codes(by_stop)  # unless the stops were renumbered: then the next poll finds them
-            return
-        with self.lock:
-            self.by_stop, self.fetched_at = by_stop, now
-            self.names.update(names)
-            self.modes.update(modes)
-        self._recheck_codes(by_stop)
-        log.debug("departures updated: %d departures from %d stops", sum(map(len, by_stop.values())), len(by_stop))
-
-    def _recheck_codes(self, by_stop: dict) -> None:
-        """A code whose cached id HSL no longer knows (stops get renumbered) is
-        looked up afresh at the next poll, once per run. Until that lookup
-        gives a new id the old one stays: the answer may simply have been
-        empty (an outage at their end), and without the id the departures
-        kept from before couldn't be shown."""
-        for code, stop_id in list(self.code_ids.items()):
-            if stop_id not in by_stop and code not in self.rechecked_codes and any(
-                code == ref.upper() for s in self.cfg.stops.values() for ref in s.ids
-            ):
-                log.warning("stop %s (%s) is unknown to HSL; looking the code up again", code, stop_id)
-                self.rechecked_codes.add(code)
-                self.stale_codes.add(code)
-
-    def stops(self, now: datetime) -> dict[str, departures.StopDepartures]:
-        """By stop widget name."""
-        with self.lock:
-            by_stop, names, modes = self.by_stop, self.names, self.modes
-        out = {}
-        for i, (widget, stop) in enumerate(self.cfg.stops.items()):
-            if self.live and widget in self.configured:
-                query = self._query(widget)
-                out[widget] = departures.StopDepartures(
-                    self._name(stop, query, names),
-                    hsl.select(by_stop, query),
-                    departures.ordered_modes(modes[sid] for sid in query.ids if sid in modes),
-                )
-            else:
-                name = stop.name or (stop.ids[0] if stop.ids else "—")
-                out[widget] = departures.placeholder(name, i, now)
-        return out
-
-    @staticmethod
-    def _name(stop, query: hsl.StopQuery, names: dict[str, str]) -> str:
-        """The configured name, else HSL's name for the stop, else its code until known."""
-        if stop.name:
-            return stop.name
-        for stop_id in query.ids:
-            if stop_id in names:
-                return names[stop_id]
-        return stop.ids[0]
-
-
 def scene(
-    cfg: Config, weather: Weather, transit: Transit, now: datetime | None = None,
+    cfg: Config, sources: Sources, now: datetime | None = None,
     device_battery: battery.Battery | None = None, interval_minutes: int = 1,
 ) -> render.Scene:
     now = now or datetime.now(cfg.tz)
+    weather, transit = sources.weather, sources.transit
+    # Before the data: if a refresh lands in between, the status bar warns
+    # about data a moment older than drawn, rather than missing a warning.
+    warnings = sources.warnings(now, cfg.language)
     return render.Scene(
         now=now,
         language=cfg.language,
         forecast=weather.forecast,
-        weather_stale_after=timedelta(minutes=cfg.weather_stale_after_minutes),
         stops=transit.stops(now),
         departures_live=transit.live,
         departures_fetched_at=transit.fetched_at,
-        departures_stale_after=timedelta(minutes=cfg.departures_stale_after_minutes),
+        departures_stale_after=transit.stale_after,
         battery_percent=device_battery.level(now) if device_battery else None,
         departure_clock=interval_minutes > 1,
+        warnings=warnings,
     )
 
 
 def cmd_render(cfg: Config, args: argparse.Namespace) -> None:
-    weather, transit = Weather(cfg), Transit(cfg)
+    sources = Sources.make(cfg)
     if not args.offline:
-        weather.refresh(force=True)
-        transit.refresh()
+        for source in sources.periodic:
+            source.refresh(force=True)
+        sources.transit.refresh()
     if args.screen and args.screen not in cfg.screens:
         raise SystemExit(f"no screen {args.screen!r}; the screens are: {', '.join(cfg.screens)}")
-    sc = scene(cfg, weather, transit)
+    sc = scene(cfg, sources)
     img = render.render(cfg, sc, args.screen, cfg.deck_at(sc.now))
     Path(args.output).write_bytes(render.to_png(img))
     print(f"wrote {args.output}")
@@ -476,13 +226,14 @@ def log_safe(text: str) -> str:
 
 
 def make_handler(
-    cfg: Config, weather: Weather, transit: Transit, prerendered: schedule.Prerendered | None = None,
+    cfg: Config, sources: Sources, prerendered: schedule.Prerendered | None = None,
     device_battery: battery.Battery | None = None, selection: decks.Selection | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     prerendered = prerendered or schedule.Prerendered()
     device_battery = device_battery or battery.Battery()
     selection = selection or decks.Selection()
     recent = schedule.Recent()
+    transit = sources.transit
 
     class Handler(BaseHTTPRequestHandler):
         # A request must arrive within this many seconds of connecting (see
@@ -533,8 +284,9 @@ def make_handler(
                     device_battery.report((query.get("battery_mv") or [None])[0], datetime.now(cfg.tz))
                 if refresh:
                     # Button press on the device: fresh departures, rate-limited.
-                    # (Weather is left to the refresher, which checks it every
-                    # minute; fetching it here could keep the device waiting.)
+                    # (Interval sources such as the weather are left to the
+                    # refresher, which checks them every minute; fetching them
+                    # here could keep the device waiting.)
                     transit.refresh(cfg.departures_min_refresh_seconds, wait_seconds=UPSTREAM_WAIT)
                 plan = schedule.plan(datetime.now(cfg.tz), cfg.wake_schedule, cfg.wake_offset_seconds)
                 planned_at = time.monotonic()
@@ -560,15 +312,14 @@ def make_handler(
                     # while, since polling follows the device's schedule.
                     if not refresh:  # a refresh has just asked, and waited, once already
                         transit.refresh(60, wait_seconds=UPSTREAM_WAIT)
-                    forecast = weather.forecast
                     # Drawn one at a time and shared for a few seconds (see
                     # schedule.Recent), unless the minute or the data changed.
                     key = (
                         plan.display_time.replace(second=0, microsecond=0), plan.interval_minutes, screen,
-                        transit.fetched_at, forecast.fetched_at if forecast else None,
+                        *sources.data_times(),
                     )
                     body = recent.get(key, url.path, lambda: render.render(cfg, scene(
-                        cfg, weather, transit, plan.display_time, device_battery, plan.interval_minutes,
+                        cfg, sources, plan.display_time, device_battery, plan.interval_minutes,
                     ), screen, deck, forgiving=True), encode)
                 # The device counts its sleep from when the answer arrives, so
                 # take off what the wait for departures and the drawing took.
@@ -605,7 +356,8 @@ def make_handler(
 
 
 def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
-    weather, transit = Weather(cfg), Transit(cfg)
+    sources = Sources.make(cfg)
+    transit = sources.transit
     prerendered = schedule.Prerendered()
     device_battery = battery.Battery(cfg.battery_full_mv, cfg.cache_dir / "battery.csv")
     selection = decks.Selection()
@@ -620,11 +372,12 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
         # with no polling and no pre-drawn images, and nothing would restart it.
         transit.refresh(wait_seconds=POLL_WAIT)
         while not stop.is_set():
-            try:
-                # Right after a poll, so a slow answer can't delay the next one.
-                weather.refresh()  # checks its own 15-minute interval
-            except Exception:
-                log.exception("weather refresh failed")
+            # Right after a poll, so a slow answer can't delay the next one.
+            for source in sources.periodic:
+                try:
+                    source.refresh()  # checks its own interval
+                except Exception:
+                    log.exception("%s refresh failed", source.WHAT)
             now = datetime.now(cfg.tz)
             next_poll = schedule.next_poll(now, cfg.departures_poll_lead_seconds)
             if stop.wait(max(0.0, schedule.seconds_between(now, next_poll))):
@@ -641,7 +394,7 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
                 # Then its neighbours, for a button press that changes screens.
                 deck = cfg.deck_at(minute)
                 showing = selection.peek(deck)
-                sc = scene(cfg, weather, transit, minute, device_battery, interval)
+                sc = scene(cfg, sources, minute, device_battery, interval)
                 for screen in (showing, *deck.neighbours(showing)):
                     img = render.render(cfg, sc, screen, deck, forgiving=True)
                     prerendered.put(minute, screen, {path: encode(img) for path, (encode, _) in render.FORMATS.items()},
@@ -652,7 +405,7 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
             log.debug("pre-rendered %s in %.1f s", minute.strftime("%H:%M"), time.monotonic() - started)
 
     threading.Thread(target=refresher, daemon=True).start()
-    Handler = make_handler(cfg, weather, transit, prerendered, device_battery, selection)
+    Handler = make_handler(cfg, sources, prerendered, device_battery, selection)
 
     server = ThreadingHTTPServer((cfg.host, cfg.port), Handler)
     log.info("serving on http://%s:%d/ (image at /glance.png, /glance.g2)", cfg.host, cfg.port)

@@ -1,4 +1,6 @@
-"""User-visible strings and date/time formatting for English and Finnish."""
+"""English and Finnish: formats for dates, times, ages and percentages, and
+looking up a part's own words. Each part that shows words keeps them itself,
+as WORDS = {"en": {...}, "fi": {...}}: a widget, a source, the status bar."""
 
 from __future__ import annotations
 
@@ -13,34 +15,8 @@ MONTHS_EN = [
     "July", "August", "September", "October", "November", "December",
 ]
 
-STRINGS = {
-    "en": {
-        "weather_old": "Weather {age} old",
-        "feels_like": "Feels like {temp}",
-        "battery_low": "Charge battery",
-        "now": "now",
-        "min": "min",
-        "no_departures": "No departures",
-        "weather_unavailable": "Weather unavailable",
-        "departures_old": "Departures {age} old",
-        "departures_unavailable": "Departures unavailable",
-    },
-    "fi": {
-        "weather_old": "Sää {age} vanha",
-        "feels_like": "Tuntuu kuin {temp}",
-        "battery_low": "Lataa akku",
-        "now": "nyt",
-        "min": "min",
-        "no_departures": "Ei lähtöjä",
-        "weather_unavailable": "Säätietoja ei saatavilla",
-        "departures_old": "Lähdöt {age} vanhoja",
-        "departures_unavailable": "Lähtötietoja ei saatavilla",
-    },
-}
-
-
-def t(language: str, key: str, **kwargs: str) -> str:
-    return STRINGS[language][key].format(**kwargs)
+def t(words: dict[str, dict[str, str]], language: str, key: str, **kwargs: str) -> str:
+    return words[language][key].format(**kwargs)
 
 
 def clock(language: str, when: datetime) -> str:

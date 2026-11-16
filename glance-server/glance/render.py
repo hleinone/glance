@@ -19,6 +19,8 @@ __all__ = ["Scene", "render", "to_png", "to_g2", "FORMATS"]
 
 log = logging.getLogger(__name__)
 
+WORDS = {"en": {"battery_low": "Charge battery"}, "fi": {"battery_low": "Lataa akku"}}
+
 
 def _status_warning(sc: Scene) -> str | None:
     """Right-hand status bar warning, or None while all data is fresh.
@@ -26,23 +28,10 @@ def _status_warning(sc: Scene) -> str | None:
     No "Updated HH:MM" when all is well: data is fetched just before the
     minute, so it would always read one minute behind the clock.
     """
-    lang = sc.language
-    warnings = []
-    fc = sc.forecast
-    if fc is None:
-        warnings.append(i18n.t(lang, "weather_unavailable"))
-    elif sc.now - fc.fetched_at > sc.weather_stale_after:
-        minutes = (sc.now - fc.fetched_at).total_seconds() / 60
-        warnings.append(i18n.t(lang, "weather_old", age=i18n.age(minutes)))
-    if sc.departures_stale:
-        if sc.departures_fetched_at is None:
-            warnings.append(i18n.t(lang, "departures_unavailable"))
-        else:
-            minutes = (sc.now - sc.departures_fetched_at).total_seconds() / 60
-            warnings.append(i18n.t(lang, "departures_old", age=i18n.age(minutes)))
+    warnings = list(sc.warnings)  # what the sources say is old or missing
     if sc.battery_percent is not None and sc.battery_percent <= battery.LOW_PERCENT:
         # The level itself is shown next to the badge; the badge says what to do.
-        warnings.append(i18n.t(lang, "battery_low"))
+        warnings.append(i18n.t(WORDS, sc.language, "battery_low"))
     return " · ".join(warnings) or None
 
 
