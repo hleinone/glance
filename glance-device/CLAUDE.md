@@ -16,6 +16,7 @@ mise tasks here: `mise run build`, `mise run upload` (reTerminal on USB-C; it wo
 - Logs and flashing go through an on-board USB-to-serial bridge on UART1 (GPIO43 TX, GPIO44 RX): `Serial1`, not USB CDC.
 - Battery: drive GPIO21 high, read the ADC on GPIO1, double it.
 - Buttons, pressed = low (checked on the device; Seeed's ESPHome page has them wrong): left white GPIO5, middle white GPIO4, right green GPIO3.
+- Buzzer: GPIO45, sounded with a square wave from LEDC (checked on the device). GPIO45 is a strapping pin (flash voltage, low by default), so it is driven low when silent and held low through deep sleep (`gpio_hold_en` and `gpio_deep_sleep_hold_en`; released at boot), never left high.
 
 ## Drawing
 
@@ -38,6 +39,7 @@ The battery is read before Wi-Fi starts, since the radio makes the voltage sag (
 - A press during an update is caught by an interrupt and gets its own update right after (`pending_button` in RTC memory, a 0.5 s sleep; the last press wins).
 - On a deck of one screen (`X-Glance-Deck-Size`, kept in RTC memory) a white press goes straight back to sleep until the planned wake (`wake_due_ms`, on the RTC clock, which keeps counting through deep sleep). A `204` answer means nothing to draw.
 - A failed attempt carries its button to the retry only if the server never answered, or if it was a refresh: a step the server already made would otherwise be made twice.
+- A press that will change the screen gets a sound at once, since the new image takes about 10 s: one beep for the green button (2 kHz, 70 ms), a shorter, higher tick for the white ones (3 kHz, 25 ms), both at half duty. On a button wake it plays after the battery reading and before the panel and Wi-Fi start, about 50 ms after boot. A press during an update gets its sound when that update ends (the panel's refresh keeps the chip busy), and the update it asked for is silent. Silent: timed wakes, retries, a white press on a deck of one, an empty battery. The same sound at all hours, since a press is always someone's own (the founder's choice, GL-3).
 
 Lessons:
 

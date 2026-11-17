@@ -57,6 +57,11 @@ static const char *const BUTTON_NAME[] = {"none", "refresh", "next", "prev"};  /
 // battery voltage).
 static constexpr int PIN_BATTERY_ADC = 1;
 static constexpr int PIN_BATTERY_EN = 21;
+// Buzzer: GPIO45 (Seeed's guides for the reTerminal E series), sounded with a
+// square wave. Low when silent, and held low through deep sleep so it draws
+// nothing. GPIO45 is also a strapping pin (it picks the flash voltage at
+// reset, low being the default), so it is never left high.
+static constexpr gpio_num_t PIN_BUZZER = GPIO_NUM_45;
 
 static constexpr int DEFAULT_SLEEP_S = 60;  // if the server doesn't say
 // The shortest sleeps the server may ask for repeatedly. One short sleep is
@@ -130,6 +135,50 @@ static int read_battery_mv() {
   digitalWrite(PIN_BATTERY_EN, LOW);
   const int mv = sum / 8 * 2;  // the divider halves it
   return (mv > 2500 && mv < 5000) ? mv : 0;
+}
+
+// --- sound ----------------------------------------------------------------------
+
+// A press that will change the screen is answered at once with a sound, since
+// the new image takes about 10 s to appear: one beep for the green button
+// (fresh data), a shorter, higher tick for the white ones (another screen).
+// Timed wakes, retries and presses with nothing to change are silent.
+struct Sound {
+  uint32_t hz;
+  uint32_t ms;
+};
+static constexpr Sound REFRESH_SOUND = {2000, 70};
+static constexpr Sound STEP_SOUND = {3000, 25};
+// Of the 8-bit duty cycle: below half is quieter (a softer sound).
+static constexpr uint32_t SOUND_DUTY = 128;
+
+// The pin may still be held from the last deep sleep: release it, and keep it low.
+static void buzzer_quiet() {
+  gpio_hold_dis(PIN_BUZZER);
+  pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
+}
+
+// Keep the buzzer low through deep sleep (a digital pin would otherwise float).
+static void buzzer_hold_for_sleep() {
+  gpio_hold_en(PIN_BUZZER);
+  gpio_deep_sleep_hold_en();
+}
+
+static void play_press_sound(Button button) {
+  const Sound s = button == REFRESH ? REFRESH_SOUND : STEP_SOUND;
+  const uint32_t at = millis();
+  buzzer_quiet();
+  if (!ledcAttach(PIN_BUZZER, s.hz, 8)) {
+    LOG.println("[sound] could not drive the buzzer");
+    return;
+  }
+  ledcWrite(PIN_BUZZER, SOUND_DUTY);
+  delay(s.ms);
+  ledcWrite(PIN_BUZZER, 0);
+  ledcDetach(PIN_BUZZER);
+  buzzer_quiet();
+  LOG.printf("[sound] %s at %lu ms since boot\n", BUTTON_NAME[button], (unsigned long)at);
 }
 
 // --- network --------------------------------------------------------------------
@@ -491,6 +540,7 @@ static void on_awake_limit(void *) {
   wake_due_ms = rtc_now_ms() + retry_s * 1000LL;
   esp_sleep_enable_timer_wakeup(uint64_t(retry_s) * 1000000ULL);
   wake_on_buttons();
+  buzzer_hold_for_sleep();
   esp_deep_sleep_start();
 }
 
@@ -507,6 +557,9 @@ static void deep_sleep(uint32_t ms) {
   awake_limit_hits = 0;  // got here by itself: nothing hung
   const Button pressed = pressed_while_awake();
   if (pressed != NO_BUTTON && worth_doing(pressed)) {
+    // Its sound now, as soon as it is noticed: the panel's refresh kept the
+    // chip busy. The update it asked for follows silently.
+    play_press_sound(pressed);
     pending_button = pressed;
     ms = 500;  // come straight back for the update the press asked for
   } else if (pressed != NO_BUTTON) {
@@ -525,6 +578,7 @@ static void deep_sleep(uint32_t ms) {
   }
   esp_sleep_enable_timer_wakeup(uint64_t(ms) * 1000ULL);
   wake_on_buttons();
+  buzzer_hold_for_sleep();
   esp_deep_sleep_start();
 }
 
@@ -550,6 +604,7 @@ void setup() {
   const uint32_t boot = millis();
   LOG.begin(115200, SERIAL_8N1, PIN_LOG_RX, PIN_LOG_TX);
   start_awake_limit();
+  buzzer_quiet();  // held low through the sleep just ended
   // Hand the button pins back from the RTC (sleep-time) domain to normal GPIO.
   for (gpio_num_t pin : BUTTONS) {
     rtc_gpio_deinit(pin);
@@ -559,6 +614,7 @@ void setup() {
   watch_buttons();
   Button button = pending_button;
   pending_button = NO_BUTTON;
+  bool pressed_now = false;  // woken by a press that has something to do: it gets its sound
   if (cause == ESP_SLEEP_WAKEUP_EXT1) {
     const uint64_t pins = esp_sleep_get_ext1_wakeup_status();
     for (int i = 0; i < NUM_BUTTONS; i++)
@@ -572,6 +628,7 @@ void setup() {
       if (left > 1000) deep_sleep(left);
       button = NO_BUTTON;  // the planned wake is due anyway: a normal update
     }
+    pressed_now = button != NO_BUTTON;
   } else {
     LOG.printf("\n[glance] %s%s%s\n", cause == ESP_SLEEP_WAKEUP_TIMER ? "timer wake" : "power on / reset",
                button != NO_BUTTON ? ", for a press: " : "", button != NO_BUTTON ? BUTTON_NAME[button] : "");
@@ -583,6 +640,9 @@ void setup() {
     LOG.printf("[battery] empty: no update, looking again in %d s\n", BATTERY_EMPTY_SLEEP_S);
     deep_sleep(BATTERY_EMPTY_SLEEP_S * 1000UL);
   }
+  // After the battery reading (nothing else drawing current while it is read),
+  // before the panel and the radio start.
+  if (pressed_now) play_press_sound(button);
   epaper.begin();
   start_wifi();
   // A press takes a while to show (the server draws, then the panel's 6 s
