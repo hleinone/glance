@@ -1,4 +1,4 @@
-"""English and Finnish: formats for dates, times, ages and percentages, and
+"""English and Finnish: formats for dates, times, ages, decimals and percentages, and
 looking up a part's own words. Each part that shows words keeps them itself,
 as WORDS = {"en": {...}, "fi": {...}}: a widget, a source, the status bar."""
 
@@ -29,6 +29,14 @@ def date(language: str, when: datetime) -> str:
     if language == "fi":
         return f"{weekday.capitalize()} {when.day}.{when.month}."
     return f"{weekday} {when.day} {MONTHS_EN[when.month - 1]}"
+
+
+def decimal(language: str, value: float, places: int = 1) -> str:
+    """'12.3' in English, '12,3' in Finnish, with a real minus sign below zero."""
+    text = f"{abs(value):.{places}f}"
+    if language == "fi":
+        text = text.replace(".", ",")
+    return f"−{text}" if round(value, places) < 0 else text
 
 
 def percent(language: str, value: int) -> str:

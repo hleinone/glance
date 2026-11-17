@@ -24,14 +24,15 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from . import fmi_weather_hourly, fmi_weather_now, hsl_stops
+from . import fmi_weather_hourly, fmi_weather_now, hsl_stops, spot_prices
 from .fmi_weather_hourly import FmiWeatherHourly
 from .fmi_weather_now import FmiWeatherNow
 from .hsl_stops import HslStops
+from .spot_prices import SpotPrices
 
-TYPES: dict[str, ModuleType] = {m.TYPE: m for m in (fmi_weather_now, fmi_weather_hourly, hsl_stops)}
+TYPES: dict[str, ModuleType] = {m.TYPE: m for m in (fmi_weather_now, fmi_weather_hourly, hsl_stops, spot_prices)}
 
-Widget = FmiWeatherNow | FmiWeatherHourly | HslStops
+Widget = FmiWeatherNow | FmiWeatherHourly | HslStops | SpotPrices
 
 
 def module(widget: Widget) -> ModuleType:

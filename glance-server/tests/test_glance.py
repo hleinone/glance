@@ -2,14 +2,15 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from glance import battery, config, decks, draw, i18n, layout, render, schedule, widgets
-from glance.sources import fmi, hsl
-from glance.widgets import fmi_symbols, fmi_weather_hourly, hsl_stops
+from glance.sources import elering, fmi, hsl
+from glance.widgets import fmi_symbols, fmi_weather_hourly, hsl_stops, spot_prices
 
 DATA = Path(__file__).parent / "data"
 HELSINKI = ZoneInfo("Europe/Helsinki")
@@ -657,6 +658,82 @@ class LayoutTest(unittest.TestCase):
             self.assertEqual(list(config.load(path, local_overrides=True).screens), ["home"])
 
 
+def quarter_prices(first: datetime, values: list[float]) -> elering.Prices:
+    """Prices (€/MWh) for consecutive quarter hours from `first`."""
+    start = first.astimezone(UTC)
+    return elering.Prices(start, tuple(elering.Price(start + i * timedelta(minutes=15), v) for i, v in enumerate(values)))
+
+
+class SpotPricesTest(unittest.TestCase):
+    NOW = datetime(2027, 1, 19, 16, 42, 30, tzinfo=HELSINKI)
+
+    def test_a_price_is_shown_in_cents_per_kwh_with_vat(self):
+        self.assertAlmostEqual(spot_prices.cents(100.0), 12.55)  # 100 €/MWh = 10 c/kWh, plus 25.5 %
+        self.assertAlmostEqual(spot_prices.cents(-20.0), -2.51)
+
+    def test_decimals_in_english_and_finnish(self):
+        self.assertEqual(i18n.decimal("en", 12.34), "12.3")
+        self.assertEqual(i18n.decimal("fi", 12.34), "12,3")
+        self.assertEqual(i18n.decimal("fi", -2.84), "−2,8")  # a real minus sign
+        self.assertEqual(i18n.decimal("en", -0.04), "0.0")  # no minus on a zero
+
+    def test_the_price_now_is_the_quarter_now_falls_in(self):
+        start = datetime(2027, 1, 19, 16, 30, tzinfo=HELSINKI)
+        prices = quarter_prices(start, [10.0, 20.0])
+        self.assertEqual(prices.at(start).eur_per_mwh, 10.0)
+        self.assertEqual(prices.at(start + timedelta(minutes=15) - timedelta(microseconds=1)).eur_per_mwh, 10.0)
+        self.assertEqual(prices.at(start + timedelta(minutes=15)).eur_per_mwh, 20.0)
+        self.assertIsNone(prices.at(start - timedelta(microseconds=1)))
+        self.assertIsNone(prices.at(start + timedelta(minutes=30)))
+
+    def test_bars_cover_the_next_24_hours_from_the_quarter_now(self):
+        first = datetime(2027, 1, 19, 16, 30, tzinfo=HELSINKI)
+        prices = quarter_prices(first, [100.0] * 4 + [200.0] * 60)  # 16 hours known, then none
+        quarters = spot_prices.bars(prices, self.NOW, timedelta(minutes=15))
+        self.assertEqual(len(quarters), 96)
+        self.assertEqual(quarters[0][0], first.astimezone(UTC))
+        self.assertAlmostEqual(quarters[0][1], 12.55)
+        self.assertAlmostEqual(quarters[4][1], 25.1)
+        self.assertIsNone(quarters[64][1])  # not published yet
+        hours = spot_prices.bars(prices, self.NOW, timedelta(hours=1))
+        self.assertEqual(len(hours), 24)
+        self.assertEqual(hours[0][0], datetime(2027, 1, 19, 16, 0, tzinfo=HELSINKI).astimezone(UTC))
+        self.assertIsNone(hours[0][1])  # 16.00-16.30 isn't in the prices, so the hour isn't whole
+        self.assertAlmostEqual(hours[1][1], (12.55 * 2 + 25.1 * 2) / 4)
+
+    def test_bars_span_24_real_hours_on_a_daylight_saving_day(self):
+        now = datetime(2027, 3, 28, 1, 50, tzinfo=HELSINKI)  # clocks go from 03.00 to 04.00 tonight
+        prices = quarter_prices(datetime(2027, 3, 28, 1, 45, tzinfo=HELSINKI), [50.0] * 96)
+        quarters = spot_prices.bars(prices, now, timedelta(minutes=15))
+        self.assertEqual(len(quarters), 96)
+        self.assertEqual(quarters[-1][0] - quarters[0][0], timedelta(hours=23, minutes=45))
+        self.assertTrue(all(c is not None for _, c in quarters))
+        self.assertEqual(quarters[-1][0].astimezone(HELSINKI).hour, 2)  # 01.45 + 24 h, an hour later on the wall
+
+    def test_the_cheapest_hour_is_a_whole_clock_hour_still_to_come(self):
+        first = datetime(2027, 1, 19, 16, 0, tzinfo=HELSINKI)
+        values = [80.0] * 96
+        values[0:4] = [10.0] * 4  # 16-17: cheapest, but half gone at 16.42
+        values[4 * 5:4 * 6] = [20.0, 20.0, 30.0, 30.0]  # 21-22
+        prices = quarter_prices(first, values)
+        start, price = spot_prices.cheapest_hour(prices, self.NOW)
+        self.assertEqual(start, datetime(2027, 1, 19, 21, 0, tzinfo=HELSINKI).astimezone(UTC))
+        self.assertAlmostEqual(price, 25 / 10 * 1.255)
+        on_the_hour = self.NOW.replace(minute=0, second=0)
+        self.assertEqual(spot_prices.cheapest_hour(prices, on_the_hour)[0], first.astimezone(UTC))
+
+    def test_without_a_price_for_now_it_says_so(self):
+        from PIL import Image, ImageDraw
+        stale = quarter_prices(self.NOW - timedelta(hours=3), [50.0] * 4)  # ended hours ago
+        for prices in (None, stale):
+            for language, words in (("en", "Spot price unavailable"), ("fi", "Pörssisähkön hintaa ei saatavilla")):
+                img = Image.new("L", (800, 150), 255)
+                sc = render.Scene(now=self.NOW, language=language, forecast=None, stops={}, spot_prices=prices)
+                with mock.patch.object(spot_prices, "text_vcenter") as text:
+                    spot_prices.draw(img, ImageDraw.Draw(img), sc, (0, 0, 800, 150), "w", widgets.SpotPrices())
+                self.assertEqual([c.args[3] for c in text.call_args_list], [words])
+
+
 class WidgetSizeTest(unittest.TestCase):
     """Widgets fill their rectangle and stay inside it, down to their minimum size."""
 
@@ -703,6 +780,21 @@ class WidgetSizeTest(unittest.TestCase):
                         for case in (sc, replace(sc, forecast=None, stops={"w": hsl.StopDepartures("—", [])})):
                             with self.subTest(widget=type(widget).__name__, size=size, language=language, clock=clock):
                                 self.assertIsNone(self.drawn_outside(widget, size, case))
+
+    def test_spot_prices_stay_inside(self):
+        widget = widgets.SpotPrices()
+        min_w, min_h = widget.MIN_SIZE
+        # The market's limits, alternating, with the next day not yet published: the widest
+        # numbers ("−62,8", "502,0"), the tallest bars both ways and the outline's words.
+        extremes = quarter_prices(self.NOW - timedelta(minutes=15), [-500.0, 4000.0] * 40)
+        for size in ((min_w, min_h), (533, 150), (800, 150), (min_w, 450), (800, min_h)):
+            for language in ("en", "fi"):
+                for bar in (timedelta(minutes=15), timedelta(hours=1)):
+                    for prices in (extremes, None):
+                        sc = replace(self.worst_case(language, False), spot_prices=prices)
+                        with self.subTest(size=size, language=language, bar=bar, prices=prices is not None), \
+                                mock.patch.object(spot_prices, "BAR", bar):
+                            self.assertIsNone(self.drawn_outside(widget, size, sc))
 
     def test_fill(self):
         self.assertEqual(fmi_weather_hourly.hours_fitting(533), 12)  # 4 of 6 columns: as before layouts were configurable
