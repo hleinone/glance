@@ -1,6 +1,6 @@
 # glance-server
 
-Python 3.13 and Pillow. Fetches weather and departures, draws the screen, serves it; deployed to the Pi as a systemd user service. The architecture and the rules are in the root `CLAUDE.md`.
+Python 3.13 and Pillow. Fetches weather, departures and spot prices, draws the screen, serves it; deployed to the Pi as a systemd user service. The architecture and the rules are in the root `CLAUDE.md`.
 
 ## Running
 
@@ -13,7 +13,7 @@ mise run serve                   # http://localhost:8080/, with a preview that b
 mise run render                  # one image to glance.png (-- --screen NAME, --offline, --lang fi)
 mise run stops Pasila            # find stop codes
 mise run deploy                  # the tests, then deploy to $GLANCE_PI (set in mise.local.toml)
-mise run screenshot              # ../docs/screenshot.png, from sample data
+mise run screenshot              # ../docs/screenshot*.png, from sample data
 mise run icons                   # rebuild the icon PNGs (macOS only)
 ```
 
@@ -22,9 +22,9 @@ On the Pi: `journalctl --user-unit glance -f` for the log (`journalctl --user -u
 ## Code
 
 - `glance/__main__.py`: the command line (`render`, `serve`, `stops`; `-v` logs every fetch), the request handler and the refresher thread. It fetches nothing itself.
-- `glance/sources/`: one module per data source, each holding its API client, its cache and its latest good data: `fmi.py` (`Weather`, and what a forecast is) and `hsl.py` (`Transit`, and what a departure is, with the placeholder departures). `Sources` (in `sources/__init__.py`) makes them once per process and is what the commands, the refresher, the request handler and `scene()` are handed. `periodic.py` is what a source refreshed every so many minutes shares (`Weather` now; spot prices and others next): the interval, keeping the last good answer, retrying sooner after a failure, the disk cache. `glance/upstream.py`: how every source reads an answer; a test fails if a source opens a connection any other way.
+- `glance/sources/`: one module per data source, each holding its API client, its cache and its latest good data: `fmi.py` (`Weather`, and what a forecast is), `hsl.py` (`Transit`, and what a departure is, with the placeholder departures) and `elering.py` (`Electricity`, and what a price is). `Sources` (in `sources/__init__.py`) makes them once per process and is what the commands, the refresher, the request handler and `scene()` are handed. `periodic.py` is what a source refreshed every so many minutes shares (`Weather`, `Electricity`): the interval, keeping the last good answer, retrying sooner after a failure, the disk cache. `glance/upstream.py`: how every source reads an answer; a test fails if a source opens a connection any other way.
 - `glance/schedule.py`: wake times, the moment an image is drawn for, images drawn ahead (`Prerendered`) and shared (`Recent`).
-- `glance/config.py`: `config.toml` and `config.local.toml`, checked at load.
+- `glance/config.py`: `config.toml` and `config.local.toml`, checked at load. It names no source: each source reads and checks its own section (`parse_settings` in its module), held together as `SourceSettings` (`sources/__init__.py`), one field per source as in `Sources`. `glance/checks.py` has the range check both use.
 - `glance/layout.py`, `glance/decks.py`, `glance/widgets/`: screens, decks, widget types.
 - `glance/render.py`, `glance/draw.py`, `glance/scene.py`, `glance/i18n.py`: drawing. `draw.py` imports nothing of ours, so widgets can use it without import cycles; it also holds the pen small icons are drawn with (`Pen`). `i18n.py` holds the formats for dates, times, ages and percentages; words belong to whoever shows them, each part keeping its own `WORDS` in English and Finnish (a widget, a source, the status bar).
 - `glance/battery.py`: the battery level.
@@ -32,7 +32,7 @@ On the Pi: `journalctl --user-unit glance -f` for the log (`journalctl --user -u
 
 ## Data
 
-**FMI** (`sources/fmi.py`): open data WFS, no key. Stored query `fmi::forecast::edited::weather::scandinavia::point::simple`, hourly Temperature, WindSpeedMS, WindDirection, PoP, WeatherSymbol3 and FeelsLike, from local midnight (so today's high and low cover the whole day; FMI returns past hours) to now + 36 h. Refreshed at most every 15 minutes by the refresher thread, never in a request; a failed fetch is retried after 2 minutes. Cached in `cache/forecast.json` with the parameters it was fetched with, so a cache from before a parameter was added is refetched at start.
+**FMI** (`sources/fmi.py`): open data WFS, no key. Stored query `fmi::forecast::edited::weather::scandinavia::point::simple`, hourly Temperature, WindSpeedMS, WindDirection, PoP, WeatherSymbol3 and FeelsLike, from local midnight (so today's high and low cover the whole day; FMI returns past hours) to now + 36 h. Refreshed at most every 15 minutes by the refresher thread, never in a request, and only while a widget on a screen asks for the forecast; a failed fetch is retried after 2 minutes. Cached in `cache/forecast.json` with the parameters it was fetched with, so a cache from before a parameter was added is refetched at start.
 
 **HSL** (`sources/hsl.py`): Digitransit routing API v2 (`https://api.digitransit.fi/routing/v2/hsl/gtfs/v1`), key in the `digitransit-subscription-key` header (from `config.local.toml` or `GLANCE_DIGITRANSIT_KEY`).
 
@@ -44,19 +44,21 @@ On the Pi: `journalctl --user-unit glance -f` for the log (`journalctl --user -u
 - Trunk routes are GTFS route type 702 (701 is a city bus, 700 regional); the API's colour fields are empty.
 - Without a key, or for a widget without codes, placeholder departures are shown.
 
-Both clients were verified against the live APIs; `tests/data/` has a real answer from each.
+**Elering** (`sources/elering.py`): Nord Pool's day-ahead prices from Elering's open dashboard API (`https://dashboard.elering.ee/api/nps/price?start=…&end=…`, no key; the request carries only dates). The answer has the Baltic areas and Finland, in €/MWh without tax, one per quarter hour (the market's step since October 2025), each with its start in Unix seconds; only Finland's (`fi`) are kept. Fetched from local midnight to the end of tomorrow: tomorrow's prices are published around 14 Finnish time. Refreshed hourly by the refresher thread, and after 2 minutes instead when a fetch failed or the prices held don't cover now (at start, at once). Cached in `cache/spot_prices.json`. Prices don't change once published, so the status bar warns only when there is no price for now ("Spot price unavailable"), not when a fetch is old. Elering states no licence for the data (`THIRD_PARTY.md`).
 
-**Reading an answer** (`upstream.py`): with a deadline for reading the whole answer, headers included (Digitransit 10 s, FMI 20 s; urllib's own timeout only limits each read, so every read from the connection waits at most what is left of the deadline; connecting, with its TLS handshake, gets what is left once per address tried, and the name lookup is not limited), in pieces up to a 2 MB limit, and with redirects refused (urllib would send the key on to the redirect's target).
+FMI and Digitransit were verified against the live APIs, and `tests/data/` has a real answer from each. Elering was verified live on the Mac (a quarter's price matched Elering's own and Pörssisähkö.net's); its tests use made-up answers in its shape.
+
+**Reading an answer** (`upstream.py`): with a deadline for reading the whole answer, headers included (Digitransit and Elering 10 s, FMI 20 s; urllib's own timeout only limits each read, so every read from the connection waits at most what is left of the deadline; connecting, with its TLS handshake, gets what is left once per address tried, and the name lookup is not limited), in pieces up to a 2 MB limit, and with redirects refused (urllib would send the key on to the redirect's target).
 
 **Battery** (`battery.py`): the device sends its voltage; a LiPo curve turns it into a percentage, drawn with an icon in the status bar, with a "Charge battery" badge at 15 % or less. A report is ignored if implausible or over 2 hours old. `[battery] full_mv` is what this device reads when full (a real one reads below the curve's 4.20 V); readings are shifted by the difference. Every report is appended to `cache/battery.csv` (about 600 lines, 18 KB a day), and its last line restores the level after a restart.
 
 ## When things go wrong
 
-- `Weather.refresh` and `Transit.refresh` never raise: every way a fetch fails becomes `FMIError` or `HSLError`, or is caught and logged, and the refresher loop guards each round as well. (One unexpected answer once ended the refresher thread for good, with nothing to restart it.)
+- The sources' refreshes never raise: every way a fetch fails becomes `FMIError`, `HSLError` or `EleringError`, or is caught and logged, and the refresher loop guards each round as well. (One unexpected answer once ended the refresher thread for good, with nothing to restart it.)
 - The last good data stays. The right of the status bar is empty while data is fresh; weather over 45 minutes old or departures over 5 minutes old get an inverted badge ("Departures 12 min old"). Each source says when its data counts as old or missing and in what words (`warning()`), and the status bar lists what they say, then its own "Charge battery"; and stale realtime minutes are drawn grey like timetable ones.
 - An answer with none of the stops asked for is a failed fetch, not "no departures". When no stop can be asked for (its codes not looked up yet), nothing counts as fetched.
 - A stop code HSL doesn't know is looked up once per run. A cached id HSL no longer knows (stops get renumbered) is looked up again once per run, and keeps its old id until a new one comes (`Transit.stale_codes`), so departures kept from before can still be found.
-- Data that can't be drawn is stopped twice. The parsers take times without a zone as UTC, leave out hours and departures dated outside 2000–2099, symbol codes outside 0–999 and NaN or infinite values, cut HSL text to 80 characters and refuse fields that aren't text. And the server draws with `render(..., forgiving=True)`: a widget that raises leaves its area empty and a traceback in the log. Tests and `render` on the command line stay strict, so the deploy's pre-check still catches mistakes.
+- Data that can't be drawn is stopped twice. The parsers take times without a zone as UTC, leave out hours, departures and prices dated outside 2000–2099, symbol codes outside 0–999, prices outside −1000…10000 €/MWh (the market's limits are −500 and 4000) and NaN or infinite values, cut HSL text to 80 characters and refuse fields that aren't text. And the server draws with `render(..., forgiving=True)`: a widget that raises leaves its area empty and a traceback in the log. Tests and `render` on the command line stay strict, so the deploy's pre-check still catches mistakes.
 - Rate limits run on `time.monotonic()`: the Pi has no clock of its own, and a clock set back must not hold off fetches.
 
 ## Wake schedule and timing
@@ -78,10 +80,10 @@ Both clients were verified against the live APIs; `tests/data/` has a real answe
 ## Screens, decks and widgets
 
 - A screen (`[screens.<name>] grid`) is a picture of widget names, like CSS `grid-template-areas`: words per line are columns, lines are rows, each name fills a rectangle, `.` is empty. Cells share the 800×450 px below the status bar equally (`Layout.rect`).
-- A widget (`[widgets.<name>]`) has a `type`, named for its look. The type knows its data provider, so the config never names one. The types are `fmi_weather_now`, `fmi_weather_hourly` and `hsl_stops`.
-- Each type is one module in `glance/widgets/` holding everything about it: `TYPE`, `SETTINGS`, `parse()`, its fill rule and `draw()`. `widgets/__init__.py` lists them by hand; adding a type is a module and a line there. Drawing every widget can use goes in `draw.py`, never in another widget's module. Pictures one widget draws stay in its module (HSL's mode pictograms in `hsl_stops.py`, the wind arrow in `fmi_weather_now.py`); pictures a family of widgets shares get a module named for them (`fmi_symbols.py`, for the two FMI weather widgets). A widget never fetches: its data comes from a source in `glance/sources/` through the scene, and a new provider is a new module there (`Periodic` if it is refreshed on an interval), a field in `Sources` (and in its `periodic` list) with a `warning()` for the status bar, and a field in `Scene` with its line in `scene()`.
+- A widget (`[widgets.<name>]`) has a `type`, named for its look. The type knows its data provider, so the config never names one. The types are `fmi_weather_now`, `fmi_weather_hourly`, `hsl_stops` and `spot_prices`.
+- Each type is one module in `glance/widgets/` holding everything about it: `TYPE`, `SETTINGS`, `parse()`, what it asks a source for (`wants`, in that source's own type: `hsl.StopRequest`, `fmi.ForecastRequest`), its fill rule and `draw()`. `widgets/__init__.py` lists them by hand; adding a type is a module and a line there. Drawing every widget can use goes in `draw.py`, never in another widget's module. Pictures one widget draws stay in its module (HSL's mode pictograms in `hsl_stops.py`, the wind arrow in `fmi_weather_now.py`); pictures a family of widgets shares get a module named for them (`fmi_symbols.py`, for the two FMI weather widgets). A widget never fetches: its data comes from a source in `glance/sources/` through the scene, and a new provider is a new module there (`Periodic` if it is refreshed on an interval), a field in `Sources` (and in its `periodic` list) with a `warning()` for the status bar, and a field in `Scene` with its line in `scene()`; with settings of its own, `parse_settings()` and a field in `SourceSettings`. A source learns what to fetch from what the widgets on the screens want (`Config.wanted`); one no widget on a screen asks for fetches nothing and gives the status bar no warning.
 - Widgets fill their rectangle: as many hourly columns as fit at 41 px, as many departure rows as fit at 32 px. Current weather keeps its one design, at the top left of a bigger area.
-- Minimum sizes are in pixels, since the same cells are a different size in another grid (`MIN_SIZE`: current weather 245×140, hourly 139×130, stops 200×72). They were chosen by drawing worst-case data. A grid that gives a widget less fails at load, saying what to change ("give it 3 columns"). `WidgetSizeTest` draws every type with worst-case data at several sizes and fails if anything lands outside its rectangle. On the panel, within a few pixels of them (250×141, 139×131 and 200×72: 5×5 cells of a 16×16 grid, 4×9 of 23×31, 1×4 of 4×25), each read well with real data; the worst-case data was drawn only in the tests.
+- Minimum sizes are in pixels, since the same cells are a different size in another grid (`MIN_SIZE`: current weather 245×140, hourly 139×130, stops 200×72, spot prices 530×120). They were chosen by drawing worst-case data. A grid that gives a widget less fails at load, saying what to change ("give it 3 columns"). `WidgetSizeTest` draws every type with worst-case data at several sizes and fails if anything lands outside its rectangle. On the panel, within a few pixels of them (250×141, 139×131 and 200×72: 5×5 cells of a 16×16 grid, 4×9 of 23×31, 1×4 of 4×25), each read well with real data; the worst-case data was drawn only in the tests.
 - A deck (`[decks.<name>]`) is an ordered list of screens with a `start`; without decks, all screens form one. The schedule picks the deck. `decks.Selection` (in memory, shared by the device and the preview) keeps the showing screen across wakes, and starts over only when the schedule switches decks or the server restarts.
 - `?button=prev|next` step through the deck, wrapping around. On a deck of one the answer is `204` with `X-Glance-Sleep`. Answers carry `X-Glance-Deck-Size` (the device skips a pointless press) and `X-Glance-Screen` (for the preview).
 
@@ -89,10 +91,11 @@ Both clients were verified against the live APIs; `tests/data/` has a real answe
 
 Settled with the user on the real panel. The default is a 6×3 grid: current weather 2×1, the hourly forecast 4×1 (12 hours) and three stop widgets 2×2 (8 departures each).
 
-- **Status bar** (30 px, black): date and time on the left; page dots in the middle on a deck of two or more (the showing screen filled; "3/12" above 8 screens); on the right the battery level, and a warning badge only when something is wrong: what the sources report, then a low battery. No "updated" time: data fetched just before the minute made it read a minute behind.
+- **Status bar** (30 px, black): date and time on the left; page dots in the middle on a deck of two or more (the showing screen filled; "3/12" above 8 screens); on the right the battery level, and a warning badge only when something is wrong: what the sources report, then a low battery. It never covers the date and clock: as many warnings as fit are shown and the rest counted ("Weather unavailable +2"). No "updated" time: data fetched just before the minute made it read a minute behind.
 - **Current weather:** icon, a big temperature with today's high over low right after it (the temperature shrinks rather than overlap them), the condition, then "feels like" and wind.
 - **Hourly forecast:** temperature, icon, chance of precipitation (every hour, 0 % too, since a gap looked like an error; rounded to 10 %), hour.
 - **Stops:** HSL's mode pictograms and the stop name, then per departure a route badge (filled black for a tram, outlined for a bus, light grey with an outline for a trunk bus; dark grey was too close to black on the panel), the destination and the minutes (black for realtime, dark grey for timetable only).
+- **Spot prices:** "Pörssisähkö" and the price for the quarter hour now, big, in snt/kWh with VAT (25.5 %, `spot_prices.VAT`); beside it a light grey bar per quarter hour for the next 24 hours, from the quarter now, over light grey lines (the zero line dark grey) with their values on both sides, the scale ending on a line and reaching at least 10 snt so a calm day's small differences don't look like swings. The cheapest whole clock hour still to come is black, with its price above it. Hours not yet published are an outline at the end saying tomorrow's prices come around 14, or from 15 that they are late ("Huomisen hinnat myöhässä"), in fewer words when it is narrow ("N. klo 14"), or none; the cheapest hour's price is kept clear of it, or left out where the known part is too narrow for it. Without a price for now, the widget says so in its area, as current weather does. Chosen by the user from mockups (GL-4); the light grey lines and bars haven't been seen on the panel yet.
 - The device draws its own marks over the right end of the bar (x 704–800): only the battery level belongs there.
 
 Design rules learned on the panel:
@@ -110,7 +113,7 @@ Icons and fonts:
 - Both tools render with macOS Quick Look (always at 304 px, since smaller thumbnails come out at the wrong scale; ImageMagick lost the outlines) and fetch a missing source from a pinned commit.
 - Fonts: bundled Inter 4.1.
 
-The README screenshot is drawn from sample data by `tools/make_screenshot.py`: a winter weekday morning at Pasila, in English, with English stop names. If a second one is ever wanted, the user wants a summer one.
+The README screenshots are drawn from sample data by `tools/make_screenshot.py`, in English with English stop names: a winter weekday morning at Pasila on the example's first screen, and a summer afternoon on its second, with spot prices below zero around midday.
 
 ## Deploy
 
@@ -151,3 +154,4 @@ Built and tested, but not seen happening on the running system:
 - The battery curve's low end: `full_mv` shifts readings by a constant, which may not hold where the warning appears.
 - Running since 2026-11-16 but not seen happening yet: a renumbered stop keeping its old id until the new one is found, and a widget that can't be drawn left empty (each logs a warning or an error when it happens); the parsers leaving out values they can't draw, and a departures fetch still running after a request stopped waiting for it (neither logs anything).
 - The deploy's one-time setup check and its linger warning: trying them means undoing the Pi's setup.
+- Spot prices on the Pi and the panel: the hourly fetch from Elering, tomorrow's prices appearing in the afternoon, the light grey bars and lines on the panel, and a failed fetch (it logs a warning).

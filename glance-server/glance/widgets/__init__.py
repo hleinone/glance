@@ -3,7 +3,9 @@
     TYPE       its name in config.toml ("hsl_stops")
     SETTINGS   the settings it takes, besides `type`
     parse()    its [widgets.<name>] section -> a frozen settings object, whose
-               class carries TYPE and MIN_SIZE
+               class carries TYPE and MIN_SIZE, and whose `wants` is what it
+               asks a source for, in that source's own type (a stop widget:
+               an hsl.StopRequest); sources fetch only what is asked for
     draw()     draw(img, draw, scene, rect, widget name, settings)
 
 MIN_SIZE is the smallest rectangle (px) the type's design reads well in, chosen
@@ -22,14 +24,15 @@ from __future__ import annotations
 
 from types import ModuleType
 
-from . import fmi_weather_hourly, fmi_weather_now, hsl_stops
+from . import fmi_weather_hourly, fmi_weather_now, hsl_stops, spot_prices
 from .fmi_weather_hourly import FmiWeatherHourly
 from .fmi_weather_now import FmiWeatherNow
 from .hsl_stops import HslStops
+from .spot_prices import SpotPrices
 
-TYPES: dict[str, ModuleType] = {m.TYPE: m for m in (fmi_weather_now, fmi_weather_hourly, hsl_stops)}
+TYPES: dict[str, ModuleType] = {m.TYPE: m for m in (fmi_weather_now, fmi_weather_hourly, hsl_stops, spot_prices)}
 
-Widget = FmiWeatherNow | FmiWeatherHourly | HslStops
+Widget = FmiWeatherNow | FmiWeatherHourly | HslStops | SpotPrices
 
 
 def module(widget: Widget) -> ModuleType:

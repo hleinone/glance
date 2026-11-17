@@ -12,6 +12,7 @@ from .. import i18n
 from ..draw import BLACK, DARK, font, fit_text, fmt_temp, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
+from ..sources.fmi import ForecastRequest
 from .fmi_symbols import symbol_info, weather_icon
 
 TYPE = "fmi_weather_hourly"
@@ -25,6 +26,7 @@ HOUR_COLUMN_MIN_W = 41
 @dataclass(frozen=True)
 class FmiWeatherHourly:
     TYPE: ClassVar[str] = TYPE
+    wants: ClassVar[ForecastRequest] = ForecastRequest()
     MIN_SIZE: ClassVar[tuple[int, int]] = (139, 130)  # 3 hours
 
 

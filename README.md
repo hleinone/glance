@@ -1,8 +1,8 @@
 # Glance
 
 A wall-mounted e-paper dashboard for Helsinki: weather from the Finnish
-Meteorological Institute (FMI) and live public transport departures from HSL,
-on a battery-powered [Seeed reTerminal E1001](https://wiki.seeedstudio.com/reterminal_e10xx_main_page/)
+Meteorological Institute (FMI), live public transport departures from HSL and
+Finland's electricity spot prices, on a battery-powered [Seeed reTerminal E1001](https://wiki.seeedstudio.com/reterminal_e10xx_main_page/)
 (7.5", 800×480, 4 greys).
 
 ![The dashboard: current weather, an hourly forecast and departures from three stops](docs/screenshot.png)
@@ -11,17 +11,23 @@ on a battery-powered [Seeed reTerminal E1001](https://wiki.seeedstudio.com/reter
 at Pasila (`mise run screenshot`). On the panel it looks exactly like this.
 The interface is also available in Finnish.*
 
+![A second screen: an hourly forecast, departures from two stops, and the electricity spot price now and for the next 24 hours](docs/screenshot-summer.png)
+
+*A second screen on a summer afternoon, from sample data too: a sunny, windy
+day, when the spot price falls below zero around midday.*
+
 ## How it works
 
-A small server (a Raspberry Pi will do) fetches the weather and departures,
-draws the whole screen as an image and serves it on the home network. The
-device only wakes up, downloads that image, shows it and goes back to deep
-sleep, so its firmware stays simple and its battery lasts.
+A small server (a Raspberry Pi will do) fetches the weather, departures and
+spot prices, draws the whole screen as an image and serves it on the home
+network. The device only wakes up, downloads that image, shows it and goes
+back to deep sleep, so its firmware stays simple and its battery lasts.
 
 ```mermaid
 flowchart LR
     fmi["FMI open data<br/>(weather)"] --> server
     hsl["HSL Digitransit API<br/>(departures)"] --> server
+    elering["Elering's open data<br/>(spot prices)"] --> server
     server["glance-server<br/>draws the screen"]
     device["reTerminal E1001<br/>wakes, shows, sleeps"]
     device -- "GET /glance.g2<br/>+ battery level" --> server
@@ -38,6 +44,11 @@ flowchart LR
   badges, trunk buses grey ones.
   Countdowns ("5 min") when the screen updates every minute, clock times
   ("14.32") when it updates less often.
+- **Electricity:** Finland's spot price for the quarter hour now, with VAT,
+  and a bar per quarter hour for the next 24 hours, the cheapest coming hour
+  in black with its price. Tomorrow's prices are published around 14 Finnish
+  time; until then the hours still unknown are marked. Nord Pool's day-ahead
+  prices, from Elering's open data (no key needed).
 - **Battery-aware schedule:** the server tells the device when to wake next
   (e.g. every minute on weekday mornings, every 5 minutes otherwise, every
   15 at night), aimed just after the minute changes so the clock is right.
@@ -55,7 +66,7 @@ flowchart LR
 |---|---|
 | [`glance-server/`](glance-server/) | Python 3.13 + Pillow. Fetches data, renders the screen, serves it over HTTP; deploy scripts for a Raspberry Pi (systemd user service). |
 | [`glance-device/`](glance-device/) | Arduino firmware (PlatformIO) for the reTerminal E1001: Wi-Fi, download, 4-grey drawing, deep sleep, buttons, battery. |
-| [`docs/`](docs/) | The screenshot above. |
+| [`docs/`](docs/) | The screenshots above. |
 
 Both folders use [mise](https://mise.jdx.dev/) for their tools and tasks
 (`mise tasks` lists them).
@@ -220,11 +231,12 @@ the `CLAUDE.md` in each folder the design decisions and measurements behind
 that part (the project was built with Claude Code). `mise run hooks` in
 `glance-server/` makes every `git push` that changes the server run its tests
 first, and stops the push if one fails (once per clone). `mise run icons` rebuilds the icon PNGs
-from their SVG sources (macOS only); `mise run screenshot` re-renders the screenshot above.
+from their SVG sources (macOS only); `mise run screenshot` re-renders the screenshots above.
 
 ## Licence
 
 MIT, see [`LICENSE`](LICENSE). The bundled fonts and icons keep their own
-licences, and the weather and transport data are CC BY 4.0: see
+licences, the weather and transport data are CC BY 4.0, and the electricity
+prices are Nord Pool's, published by Elering: see
 [`THIRD_PARTY.md`](THIRD_PARTY.md). This project is not affiliated with HSL,
-FMI or Seeed Studio.
+FMI, Nord Pool, Elering or Seeed Studio.

@@ -15,7 +15,7 @@ from .. import i18n
 from ..draw import BLACK, DARK, LIGHT, WHITE, font, fit_text, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
-from ..sources.hsl import MODE_ORDER, Departure
+from ..sources.hsl import MODE_ORDER, Departure, StopRequest
 
 TYPE = "hsl_stops"
 WORDS = {
@@ -37,6 +37,10 @@ class HslStops:
     name: str = ""  # "" = use HSL's name for the stop
     ids: tuple[str, ...] = ()  # stop codes ("H0665") and/or gtfsIds ("HSL:1174411")
     routes: frozenset[str] = frozenset()  # empty = all routes
+
+    @property
+    def wants(self) -> StopRequest:
+        return StopRequest(self.name, self.ids, self.routes)
 
 
 def parse(raw: dict) -> HslStops:

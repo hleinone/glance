@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from .sources import fmi
+from .sources import elering, fmi
 from .sources.hsl import StopDepartures, stale
 
 
@@ -25,6 +25,7 @@ class Scene:
     departure_clock: bool = False
     # What the sources say is old or missing, for the status bar.
     warnings: tuple[str, ...] = ()
+    spot_prices: elering.Prices | None = None
 
     @property
     def departures_stale(self) -> bool:

@@ -21,12 +21,32 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from .. import i18n, upstream
+from ..checks import within
 from .periodic import Periodic
 
 if TYPE_CHECKING:
     from ..config import Config
 
 log = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Settings:
+    """[fmi] in the config files."""
+    refresh_minutes: int = 15
+    stale_after_minutes: int = 45
+
+
+@dataclass(frozen=True)
+class ForecastRequest:
+    """What a weather widget asks this source for: the forecast at [location]."""
+
+
+def parse_settings(raw: dict) -> Settings:
+    return Settings(
+        refresh_minutes=within(raw.get("refresh_minutes", 15), 1, 24 * 60, "[fmi] refresh_minutes"),
+        stale_after_minutes=within(raw.get("stale_after_minutes", 45), 1, 7 * 24 * 60, "[fmi] stale_after_minutes"),
+    )
 
 WFS_URL = "https://opendata.fmi.fi/wfs"
 STORED_QUERY = "fmi::forecast::edited::weather::scandinavia::point::simple"
@@ -256,8 +276,11 @@ class Weather(Periodic[Forecast]):
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.stale_after = timedelta(minutes=cfg.weather_stale_after_minutes)
-        super().__init__(timedelta(minutes=cfg.weather_refresh_minutes), cfg.cache_dir / "forecast.json")
+        # Only fetched, and only warned about, while a widget on a screen asks for it.
+        self.wanted = bool(cfg.wanted(ForecastRequest))
+        settings = cfg.source_settings.weather
+        self.stale_after = timedelta(minutes=settings.stale_after_minutes)
+        super().__init__(timedelta(minutes=settings.refresh_minutes), cfg.cache_dir / "forecast.json")
 
     def warning(self, now: datetime, language: str) -> str | None:
         """For the status bar: that the forecast is missing or old, else None."""

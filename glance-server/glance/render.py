@@ -22,8 +22,8 @@ log = logging.getLogger(__name__)
 WORDS = {"en": {"battery_low": "Charge battery"}, "fi": {"battery_low": "Lataa akku"}}
 
 
-def _status_warning(sc: Scene) -> str | None:
-    """Right-hand status bar warning, or None while all data is fresh.
+def _status_warnings(sc: Scene) -> list[str]:
+    """Right-hand status bar warnings, none while all data is fresh.
 
     No "Updated HH:MM" when all is well: data is fetched just before the
     minute, so it would always read one minute behind the clock.
@@ -32,7 +32,22 @@ def _status_warning(sc: Scene) -> str | None:
     if sc.battery_percent is not None and sc.battery_percent <= battery.LOW_PERCENT:
         # The level itself is shown next to the badge; the badge says what to do.
         warnings.append(i18n.t(WORDS, sc.language, "battery_low"))
-    return " · ".join(warnings) or None
+    return warnings
+
+
+def _fitting(warnings: list[str], f, room: float) -> str:
+    """As many of the warnings as fit in `room`, the rest counted ("+2"), so
+    the badge never covers the date and the clock; the first is cut short if
+    even it doesn't fit."""
+    for shown in range(len(warnings), 0, -1):
+        more = f" +{len(warnings) - shown}" if shown < len(warnings) else ""
+        text = " · ".join(warnings[:shown]) + more
+        if f.getlength(text) <= room:
+            return text
+    first = warnings[0]
+    while first and f.getlength(first.rstrip() + "…" + more) > room:
+        first = first[:-1]
+    return first.rstrip() + "…" + more
 
 
 def draw_status_bar(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene,
@@ -46,9 +61,10 @@ def draw_status_bar(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene,
     right = W - 10
     if sc.battery_percent is not None:
         right = draw_battery(d, right, sc)
-    warning = _status_warning(sc)
-    if warning:  # inverted so a problem stands out from the black bar
+    warnings = _status_warnings(sc)
+    if warnings:  # inverted so a problem stands out from the black bar
         f = font("semibold", 15)
+        warning = _fitting(warnings, f, right - 16 - (10 + left_font.getlength(left) + PAGE_MARGIN))
         tw = f.getlength(warning)
         d.rounded_rectangle((right - tw - 16, 4, right + 4, BAR - 5), radius=4, fill=WHITE)
         text_vcenter(d, right - 4, BAR / 2, warning, f, BLACK, align="r")

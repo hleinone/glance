@@ -1,37 +1,53 @@
+import http.client
+import io
 import json
 import os
 import tempfile
 import unittest
+import urllib.parse
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 from glance import battery, config, decks, draw, i18n, layout, render, schedule, widgets
-from glance.sources import fmi, hsl
-from glance.widgets import fmi_symbols, fmi_weather_hourly, hsl_stops
+from glance.sources import elering, fmi, hsl
+from glance.widgets import fmi_symbols, fmi_weather_hourly, hsl_stops, spot_prices
 
 DATA = Path(__file__).parent / "data"
 HELSINKI = ZoneInfo("Europe/Helsinki")
 
 
-def isolated_config(test: unittest.TestCase, stops: list[widgets.HslStops] | None = None, **changes) -> config.Config:
+def isolated_config(test: unittest.TestCase, stops: list[widgets.HslStops] | None = None, weather: bool = False,
+                    spot: bool = False, **changes) -> config.Config:
     """config.toml alone (no config.local.toml, no environment), no key, and a
     cache folder of the test's own: tests must not depend on this machine's
     settings, reach the network or touch the real cache.
 
-    stops: one screen of just these stop widgets, side by side (s0, s1, ...)."""
+    stops: one screen of just these stop widgets, side by side (s0, s1, ...);
+    with weather, a current weather widget first; with spot, a spot price widget
+    last."""
     cache = Path(test.enterContext(tempfile.TemporaryDirectory()))
     cfg = config.load(local_overrides=False)
     if stops is not None:
         names = [f"s{i}" for i in range(len(stops))]
         changes["widgets"] = dict(zip(names, stops))
+        if weather:
+            names.insert(0, "weather")
+            changes["widgets"]["weather"] = widgets.FmiWeatherNow()
+        if spot:
+            names.append("spot")
+            changes["widgets"]["spot"] = widgets.SpotPrices()
         changes["screens"] = {"main": layout.parse(" ".join(names) or ".")}
         changes["decks"] = {"all": decks.Deck("all", ("main",), "main")}
         # The example's wake times, without its decks.
         changes["wake_schedule"] = schedule.WakeSchedule(
             tuple(replace(r, deck=None) for r in cfg.wake_schedule.rules), cfg.wake_schedule.default_every, "all")
-    return replace(cfg, **{"digitransit_key": None, "cache_dir": cache, **changes})
+    # The key is a setting of the departures source's own; None unless a test gives one.
+    transit = replace(cfg.source_settings.transit, key=changes.pop("digitransit_key", None))
+    changes.setdefault("source_settings", replace(cfg.source_settings, transit=transit))
+    return replace(cfg, **{"cache_dir": cache, **changes})
 
 
 # The least a config file needs: a location and a screen.
@@ -401,14 +417,15 @@ codes = "H0001"
                 os.environ.pop("GLANCE_DIGITRANSIT_KEY", None)  # it would win over the file
                 cfg = config.load(path)
                 os.environ["GLANCE_DIGITRANSIT_KEY"] = "from-env"
-                self.assertEqual(config.load(path).digitransit_key, "from-env")
-                self.assertEqual(config.load(path, local_overrides=False).digitransit_key, None)
-        self.assertEqual(cfg.digitransit_key, "secret")
-        self.assertEqual(list(cfg.stops), ["one", "two", "three", "four"])  # layout order; unused left out
-        self.assertEqual(cfg.stops["one"], widgets.HslStops("One", ("HSL:1",), frozenset({"7", "9"})))
-        self.assertEqual(cfg.stops["two"].ids, ("HSL:2", "HSL:3"))
-        self.assertEqual(cfg.stops["three"].ids, ("H0665", "H0664"))
-        self.assertEqual(cfg.stops["four"], widgets.HslStops("", ("H0664",)))
+                self.assertEqual(config.load(path).source_settings.transit.key, "from-env")
+                self.assertEqual(config.load(path, local_overrides=False).source_settings.transit.key, None)
+        self.assertEqual(cfg.source_settings.transit.key, "secret")
+        stops = cfg.wanted(hsl.StopRequest)  # what the stop widgets ask the departures source for
+        self.assertEqual(list(stops), ["one", "two", "three", "four"])  # layout order; unused left out
+        self.assertEqual(stops["one"], hsl.StopRequest("One", ("HSL:1",), frozenset({"7", "9"})))
+        self.assertEqual(stops["two"].ids, ("HSL:2", "HSL:3"))
+        self.assertEqual(stops["three"].ids, ("H0665", "H0664"))
+        self.assertEqual(stops["four"], hsl.StopRequest("", ("H0664",)))
         self.assertEqual(cfg.widgets["now"], widgets.FmiWeatherNow())
 
     def test_stop_code_from_geocoding(self):
@@ -427,6 +444,169 @@ codes = "H0001"
         self.assertIsNone(hsl.stop_id_from_geocoding({}, "H0665"))
         self.assertTrue(hsl.is_gtfs_id("HSL:1174411"))
         self.assertFalse(hsl.is_gtfs_id("H0665"))
+
+
+class EleringTest(unittest.TestCase):
+    """Finland's spot prices from Elering, against answers written in its shape."""
+
+    # 2027-01-19 00:00 and 00:15 Finnish time, in Unix seconds.
+    T0, T1 = 1800309600, 1800310500
+
+    def answer(self, payload) -> bytes:
+        return json.dumps(payload).encode()
+
+    def test_finlands_prices_are_taken_and_the_other_areas_left(self):
+        body = self.answer({"success": True, "data": {
+            "ee": [{"timestamp": self.T0, "price": 999.0}],
+            "fi": [{"timestamp": self.T1, "price": 52.5}, {"timestamp": self.T0, "price": -3.25}],
+            "lv": [], "lt": [],
+        }})
+        prices = elering.parse(body)
+        self.assertEqual(prices, (
+            elering.Price(datetime(2027, 1, 19, 0, 0, tzinfo=HELSINKI).astimezone(UTC), -3.25),
+            elering.Price(datetime(2027, 1, 19, 0, 15, tzinfo=HELSINKI).astimezone(UTC), 52.5),
+        ))
+
+    def test_prices_that_cant_be_right_are_left_out(self):
+        body = b'{"success": true, "data": {"fi": [' + b", ".join([
+            b'{"timestamp": %d, "price": 40.0}' % self.T0,   # the one good price
+            b'{"timestamp": %d, "price": NaN}' % self.T1,
+            b'{"timestamp": %d, "price": Infinity}' % self.T1,
+            b'{"timestamp": %d, "price": 20000.0}' % self.T1,  # beyond any market limit
+            b'{"timestamp": %d, "price": "40"}' % self.T1,      # text, not a number
+            b'{"timestamp": %d, "price": true}' % self.T1,
+            b'{"timestamp": 0, "price": 40.0}',                 # 1970
+            b'{"timestamp": 99999999999999999999, "price": 40.0}',
+            b'{"timestamp": %d, "price": 1%s}' % (self.T1, b"0" * 400),  # too big for a float
+            b'{"price": 40.0}', b'"a string"', b'null',
+        ]) + b"]}}"
+        self.assertEqual([p.eur_per_mwh for p in elering.parse(body)], [40.0])
+
+    def test_any_bad_answer_is_an_elering_error(self):
+        for body in (b"<html>busy</html>", b"[]", b"[" * 200_000, self.answer({"success": False, "data": {}}),
+                     self.answer({"success": True, "data": {"ee": []}}),
+                     self.answer({"success": True, "data": {"fi": "none"}}),
+                     self.answer({"success": True, "data": []})):
+            with self.subTest(body=body[:40]), self.assertRaises(elering.EleringError):
+                elering.parse(body)
+        empty = self.answer({"success": True, "data": {"fi": []}})
+        with mock.patch("glance.upstream._open", return_value=io.BytesIO(empty)), \
+                self.assertRaises(elering.EleringError):
+            elering.fetch(HELSINKI, datetime.now(UTC))
+        with mock.patch("glance.upstream._open", side_effect=http.client.IncompleteRead(b"{")), \
+                self.assertRaises(elering.EleringError):
+            elering.fetch(HELSINKI, datetime.now(UTC))
+
+    def test_the_request_carries_only_dates_from_local_midnight(self):
+        body = self.answer({"success": True, "data": {"fi": [
+            {"timestamp": self.T0, "price": 1.0},
+            {"timestamp": self.T0 + 3 * 24 * 3600, "price": 2.0},  # not asked for: left out
+        ]}})
+        with mock.patch("glance.upstream._open", return_value=io.BytesIO(body)) as opened:
+            prices = elering.fetch(HELSINKI, datetime(2027, 1, 19, 16, 42, tzinfo=HELSINKI))
+        self.assertEqual([p.eur_per_mwh for p in prices.prices], [1.0])
+        url = urllib.parse.urlsplit(opened.call_args.args[0].full_url)
+        self.assertEqual(url.netloc, "dashboard.elering.ee")
+        self.assertEqual(urllib.parse.parse_qs(url.query), {
+            "start": ["2027-01-18T22:00:00.000Z"],  # midnight in Helsinki
+            "end": ["2027-01-20T21:59:59.999Z"],    # the end of tomorrow there
+        })
+
+    def test_the_source_keeps_its_last_good_prices(self):
+        from glance.sources.elering import Electricity
+        cfg = isolated_config(self, stops=[], spot=True)
+        now = datetime.now(UTC)
+        good = elering.Prices(now, (elering.Price(now - timedelta(minutes=5), 50.0),))
+        source = Electricity(cfg)
+        source.prices = good
+        with mock.patch("glance.upstream._open", return_value=io.BytesIO(b"<html>busy</html>")), \
+                self.assertLogs("glance", "WARNING"):
+            source.refresh(force=True)
+        self.assertIs(source.prices, good)
+        self.assertEqual(Electricity(cfg).prices, None)  # nothing was cached by the failure
+        with mock.patch.object(elering, "fetch", return_value=good):
+            source.refresh(force=True)
+        self.assertEqual(Electricity(cfg).prices, good)  # a restart starts from the cache
+
+    def test_prices_that_dont_cover_now_are_fetched_again_at_once(self):
+        from glance.sources.elering import Electricity
+        cfg = isolated_config(self, stops=[], spot=True)
+        now = datetime.now(UTC)
+        source = Electricity(cfg)
+        fresh = elering.Prices(now, (elering.Price(now - timedelta(minutes=5), 50.0),))
+        with mock.patch.object(elering, "fetch", return_value=fresh) as fetch:
+            source.refresh()
+            source.refresh()  # covers now, fetched a moment ago: not again within the hour
+        self.assertEqual(fetch.call_count, 1)
+        ended = elering.Prices(now, (elering.Price(now - timedelta(hours=2), 50.0),))  # fetched now, but over
+        source = Electricity(cfg)
+        source.prices = ended
+        with mock.patch.object(elering, "fetch", return_value=fresh) as fetch:
+            source.refresh()
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_prices_that_dont_cover_now_are_fetched_again_soon_after_a_fetch(self):
+        # A fetch can succeed before tomorrow's prices are out; past midnight they don't cover now.
+        from glance.sources.elering import Electricity
+        source = Electricity(isolated_config(self, stops=[], spot=True))
+        now = datetime.now(UTC)
+        ended = elering.Prices(now, (elering.Price(now - timedelta(hours=2), 50.0),))
+        ticks = [1000.0, 1000.0 + 60, 1000.0 + 121]  # time.monotonic() at each refresh
+        with mock.patch.object(elering, "fetch", return_value=ended) as fetch, \
+                mock.patch("glance.sources.periodic.time.monotonic", side_effect=ticks):
+            source.refresh()  # succeeds, but nothing covers now
+            source.refresh()  # a minute later: not yet
+            source.refresh()  # after Periodic.RETRY_AFTER, not the hour
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_the_cache_is_checked_as_the_answer_is(self):
+        from glance.sources.elering import Electricity
+        cfg = isolated_config(self, stops=[], spot=True)
+        path = cfg.cache_dir / "spot_prices.json"
+        good = '["2027-01-19T14:30:00+00:00", 50.0]'
+        for fetched_at, rows in (
+            ("2027-01-19T14:00:00", good),                                  # no time zone
+            ("2027-01-19T14:00:00+00:00", '["2027-01-19T14:30:00+00:00", 1e308]'),  # beyond any market limit
+            ("2027-01-19T14:00:00+00:00", '["2027-01-19T14:30:00", 50.0]'),          # a start with no zone
+            ("2027-01-19T14:00:00+00:00", '["1970-01-01T00:00:00+00:00", 50.0]'),
+            ("2027-01-19T14:00:00+00:00", '[50.0]'),
+        ):
+            with self.subTest(fetched_at=fetched_at, rows=rows):
+                path.write_text(f'{{"fetched_at": "{fetched_at}", "prices": [{good}, {rows}]}}')
+                with self.assertLogs("glance", "WARNING"):
+                    self.assertIsNone(Electricity(cfg).prices)
+        path.write_text('{"fetched_at": "2027-01-19T14:00:00+00:00", "prices": ['
+                        '["2027-01-19T14:45:00+00:00", 60.0], ["2027-01-19T16:30:00+02:00", 50.0]]}')
+        self.assertEqual([p.start.isoformat() for p in Electricity(cfg).prices.prices],
+                         ["2027-01-19T14:30:00+00:00", "2027-01-19T14:45:00+00:00"])  # in order, in UTC
+
+    def test_status_bar_says_when_there_is_no_price_for_now(self):
+        from glance.sources import Sources
+        cfg = isolated_config(self, stops=[], spot=True)
+        sources = Sources.make(cfg)
+        now = datetime(2027, 1, 19, 16, 42, tzinfo=HELSINKI)
+        self.assertEqual(sources.warnings(now, "en"), ("Spot price unavailable",))
+        self.assertEqual(sources.warnings(now, "fi"), ("Pörssisähkön hintaa ei saatavilla",))
+        start = datetime(2027, 1, 19, 16, 30, tzinfo=HELSINKI).astimezone(UTC)
+        sources.electricity.prices = elering.Prices(start - timedelta(days=1), (elering.Price(start, 50.0),))
+        self.assertEqual(sources.warnings(now, "en"), ())  # a day-old fetch, but its price covers now
+        self.assertEqual(sources.warnings(now + timedelta(minutes=15), "en"), ("Spot price unavailable",))
+
+    def test_without_a_spot_price_widget_nothing_is_fetched_or_warned_about(self):
+        from glance.sources import Sources
+        cfg = isolated_config(self, stops=[], weather=True)
+        sources = Sources.make(cfg)
+        self.assertNotIn(sources.electricity, sources.periodic)  # the refresher and `render` leave it
+        self.assertEqual(sources.warnings(datetime(2027, 1, 19, 16, 42, tzinfo=HELSINKI), "en"), ("Weather unavailable",))
+
+    def test_the_scene_carries_the_prices_to_the_widget(self):
+        from glance.__main__ import scene
+        from glance.sources import Sources
+        cfg = isolated_config(self, stops=[], spot=True)
+        sources = Sources.make(cfg)
+        prices = elering.Prices(datetime.now(UTC), (elering.Price(datetime.now(UTC), 50.0),))
+        sources.electricity.prices = prices
+        self.assertIs(scene(cfg, sources).spot_prices, prices)
 
 
 class SourcesTest(unittest.TestCase):
@@ -636,7 +816,7 @@ class LayoutTest(unittest.TestCase):
             local = Path(d) / "config.local.toml"
             local.write_text('[screens.mine]\ngrid = "trams"\n[widgets.trams]\ntype = "hsl_stops"\ncodes = ["H0086"]\n')
             cfg = config.load(path)
-            self.assertEqual(cfg.stops, {"trams": widgets.HslStops("", ("H0086",))})  # no example name leaked
+            self.assertEqual(cfg.wanted(hsl.StopRequest), {"trams": hsl.StopRequest("", ("H0086",))})  # no example name leaked
             self.assertEqual(list(cfg.screens), ["mine"])
             self.assertEqual(cfg.decks, {"all": decks.Deck("all", ("mine",), "mine")})  # no example deck
             # No example rule pointing at an example deck, nor its intervals.
@@ -646,6 +826,133 @@ class LayoutTest(unittest.TestCase):
                 config.load(path)
             local.write_text('[digitransit]\nkey = "k"\n')  # nothing of the setup: the examples stay
             self.assertEqual(list(config.load(path, local_overrides=True).screens), ["home"])
+
+
+def quarter_prices(first: datetime, values: list[float]) -> elering.Prices:
+    """Prices (€/MWh) for consecutive quarter hours from `first`."""
+    start = first.astimezone(UTC)
+    return elering.Prices(start, tuple(elering.Price(start + i * timedelta(minutes=15), v) for i, v in enumerate(values)))
+
+
+class SpotPricesTest(unittest.TestCase):
+    NOW = datetime(2027, 1, 19, 16, 42, 30, tzinfo=HELSINKI)
+
+    def test_a_price_is_shown_in_cents_per_kwh_with_vat(self):
+        self.assertAlmostEqual(spot_prices.cents(100.0), 12.55)  # 100 €/MWh = 10 c/kWh, plus 25.5 %
+        self.assertAlmostEqual(spot_prices.cents(-20.0), -2.51)
+
+    def test_decimals_in_english_and_finnish(self):
+        self.assertEqual(i18n.decimal("en", 12.34), "12.3")
+        self.assertEqual(i18n.decimal("fi", 12.34), "12,3")
+        self.assertEqual(i18n.decimal("fi", -2.84), "−2,8")  # a real minus sign
+        self.assertEqual(i18n.decimal("en", -0.04), "0.0")  # no minus on a zero
+
+    def test_the_price_now_is_the_quarter_now_falls_in(self):
+        start = datetime(2027, 1, 19, 16, 30, tzinfo=HELSINKI)
+        prices = quarter_prices(start, [10.0, 20.0])
+        self.assertEqual(prices.at(start).eur_per_mwh, 10.0)
+        self.assertEqual(prices.at(start + timedelta(minutes=15) - timedelta(microseconds=1)).eur_per_mwh, 10.0)
+        self.assertEqual(prices.at(start + timedelta(minutes=15)).eur_per_mwh, 20.0)
+        self.assertIsNone(prices.at(start - timedelta(microseconds=1)))
+        self.assertIsNone(prices.at(start + timedelta(minutes=30)))
+
+    def test_bars_cover_the_next_24_hours_from_the_quarter_now(self):
+        first = datetime(2027, 1, 19, 16, 30, tzinfo=HELSINKI)
+        prices = quarter_prices(first, [100.0] * 4 + [200.0] * 60)  # 16 hours known, then none
+        quarters = spot_prices.bars(prices, self.NOW)
+        self.assertEqual(len(quarters), 96)
+        self.assertEqual(quarters[0][0], first.astimezone(UTC))
+        self.assertAlmostEqual(quarters[0][1], 12.55)
+        self.assertAlmostEqual(quarters[4][1], 25.1)
+        self.assertIsNone(quarters[64][1])  # not published yet
+
+    def test_bars_span_24_real_hours_on_a_daylight_saving_day(self):
+        now = datetime(2027, 3, 28, 1, 50, tzinfo=HELSINKI)  # clocks go from 03.00 to 04.00 tonight
+        prices = quarter_prices(datetime(2027, 3, 28, 1, 45, tzinfo=HELSINKI), [50.0] * 96)
+        quarters = spot_prices.bars(prices, now)
+        self.assertEqual(len(quarters), 96)
+        self.assertEqual(quarters[-1][0] - quarters[0][0], timedelta(hours=23, minutes=45))
+        self.assertTrue(all(c is not None for _, c in quarters))
+        self.assertEqual(quarters[-1][0].astimezone(HELSINKI).hour, 2)  # 01.45 + 24 h, an hour later on the wall
+
+    def test_only_the_unknown_end_is_marked_as_not_published(self):
+        first = datetime(2027, 1, 19, 16, 30, tzinfo=HELSINKI)
+        prices = quarter_prices(first, [50.0] * 64)
+        holed = replace(prices, prices=prices.prices[:10] + prices.prices[11:])  # one quarter left out
+        self.assertEqual(spot_prices.unpublished_from(spot_prices.bars(holed, self.NOW)), 64)
+        whole_day = quarter_prices(first, [50.0] * 96)
+        self.assertIsNone(spot_prices.unpublished_from(spot_prices.bars(whole_day, self.NOW)))
+
+    def draws(self, sc: render.Scene, size: tuple[int, int]) -> tuple[list, list]:
+        """The spot price widget's texts (text, x, font, align) and its outlined boxes."""
+        from PIL import Image, ImageDraw
+        img = Image.new("L", size, 255)
+        d = mock.Mock(wraps=ImageDraw.Draw(img))
+        with mock.patch.object(spot_prices, "text_vcenter", wraps=spot_prices.text_vcenter) as text:
+            spot_prices.draw(img, d, sc, (0, 0, *size), "w", widgets.SpotPrices())
+        texts = [(c.args[3], c.args[1], c.args[4], c.args[6] if len(c.args) > 6 else "l") for c in text.call_args_list]
+        boxes = [c.args[0] for c in d.rectangle.call_args_list if c.kwargs.get("outline") is not None]
+        return texts, boxes
+
+    def test_the_cheapest_hours_price_stays_whole_beside_the_unpublished_part(self):
+        morning = datetime(2027, 1, 19, 8, 12, tzinfo=HELSINKI)
+        values = [100.0] * 60 + [-95.0] * 4  # 08-24: the last hour, 23-24, is the cheapest; tomorrow isn't out
+        prices = quarter_prices(datetime(2027, 1, 19, 8, 0, tzinfo=HELSINKI), values)
+        sc = render.Scene(now=morning, language="fi", forecast=None, stops={}, spot_prices=prices)
+        texts, boxes = self.draws(sc, widgets.SpotPrices.MIN_SIZE)
+        label = i18n.decimal("fi", spot_prices.cents(-95.0))
+        (_, x, f, _), = [t for t in texts if t[0] == label]
+        self.assertLessEqual(x + f.getlength(label) / 2, boxes[0][0])  # ends before the outline starts
+
+    def test_the_cheapest_hours_price_is_left_out_where_the_known_part_is_too_narrow(self):
+        late_evening = datetime(2027, 1, 19, 23, 0, tzinfo=HELSINKI)  # one hour known, tomorrow not out
+        prices = quarter_prices(late_evening, [-95.0] * 4)
+        sc = render.Scene(now=late_evening, language="fi", forecast=None, stops={}, spot_prices=prices)
+        texts, boxes = self.draws(sc, widgets.SpotPrices.MIN_SIZE)
+        label = i18n.decimal("fi", spot_prices.cents(-95.0))
+        self.assertEqual([t for t in texts if t[0] == label], [(label, 12 - 2, mock.ANY, "l")])  # only the price now
+
+    def test_tomorrows_prices_still_missing_in_the_afternoon_are_late(self):
+        afternoon = datetime(2027, 1, 19, 16, 0, tzinfo=HELSINKI)
+        prices = quarter_prices(afternoon, [100.0] * 32)  # to midnight only
+        for language, words in (("fi", "Huomisen hinnat myöhässä"), ("en", "Tomorrow's prices late")):
+            sc = render.Scene(now=afternoon, language=language, forecast=None, stops={}, spot_prices=prices)
+            texts, _ = self.draws(sc, (800, 150))
+            with self.subTest(language=language):
+                self.assertIn(words, [t[0] for t in texts])
+                self.assertNotIn(spot_prices.WORDS[language]["tomorrow"], [t[0] for t in texts])
+
+    def test_a_narrow_unpublished_part_says_when_in_fewer_words(self):
+        early = datetime(2027, 1, 19, 6, 0, tzinfo=HELSINKI)  # 6 hours of tomorrow unknown: about 70 px
+        prices = quarter_prices(early, [100.0] * 72)
+        for language in ("fi", "en"):
+            sc = render.Scene(now=early, language=language, forecast=None, stops={}, spot_prices=prices)
+            texts, _ = self.draws(sc, widgets.SpotPrices.MIN_SIZE)
+            with self.subTest(language=language):
+                self.assertIn(spot_prices.WORDS[language]["tomorrow_short"], [t[0] for t in texts])
+
+    def test_the_cheapest_hour_is_a_whole_clock_hour_still_to_come(self):
+        first = datetime(2027, 1, 19, 16, 0, tzinfo=HELSINKI)
+        values = [80.0] * 96
+        values[0:4] = [10.0] * 4  # 16-17: cheapest, but half gone at 16.42
+        values[4 * 5:4 * 6] = [20.0, 20.0, 30.0, 30.0]  # 21-22
+        prices = quarter_prices(first, values)
+        start, price = spot_prices.cheapest_hour(prices, self.NOW)
+        self.assertEqual(start, datetime(2027, 1, 19, 21, 0, tzinfo=HELSINKI).astimezone(UTC))
+        self.assertAlmostEqual(price, 25 / 10 * 1.255)
+        on_the_hour = self.NOW.replace(minute=0, second=0)
+        self.assertEqual(spot_prices.cheapest_hour(prices, on_the_hour)[0], first.astimezone(UTC))
+
+    def test_without_a_price_for_now_it_says_so(self):
+        from PIL import Image, ImageDraw
+        stale = quarter_prices(self.NOW - timedelta(hours=3), [50.0] * 4)  # ended hours ago
+        for prices in (None, stale):
+            for language, words in (("en", "Spot price unavailable"), ("fi", "Pörssisähkön hintaa ei saatavilla")):
+                img = Image.new("L", (800, 150), 255)
+                sc = render.Scene(now=self.NOW, language=language, forecast=None, stops={}, spot_prices=prices)
+                with mock.patch.object(spot_prices, "text_vcenter") as text:
+                    spot_prices.draw(img, ImageDraw.Draw(img), sc, (0, 0, 800, 150), "w", widgets.SpotPrices())
+                self.assertEqual([c.args[3] for c in text.call_args_list], [words])
 
 
 class WidgetSizeTest(unittest.TestCase):
@@ -694,6 +1001,19 @@ class WidgetSizeTest(unittest.TestCase):
                         for case in (sc, replace(sc, forecast=None, stops={"w": hsl.StopDepartures("—", [])})):
                             with self.subTest(widget=type(widget).__name__, size=size, language=language, clock=clock):
                                 self.assertIsNone(self.drawn_outside(widget, size, case))
+
+    def test_spot_prices_stay_inside(self):
+        widget = widgets.SpotPrices()
+        min_w, min_h = widget.MIN_SIZE
+        # The market's limits, alternating, with the next day not yet published: the widest
+        # numbers ("−62,8", "502,0"), the tallest bars both ways and the outline's words.
+        extremes = quarter_prices(self.NOW - timedelta(minutes=15), [-500.0, 4000.0] * 40)
+        for size in ((min_w, min_h), (533, 150), (800, 150), (min_w, 450), (800, min_h)):
+            for language in ("en", "fi"):
+                for prices in (extremes, None):
+                    sc = replace(self.worst_case(language, False), spot_prices=prices)
+                    with self.subTest(size=size, language=language, prices=prices is not None):
+                        self.assertIsNone(self.drawn_outside(widget, size, sc))
 
     def test_fill(self):
         self.assertEqual(fmi_weather_hourly.hours_fitting(533), 12)  # 4 of 6 columns: as before layouts were configurable
@@ -762,7 +1082,7 @@ class RenderTest(unittest.TestCase):
             now=self.now,
             language="en",
             forecast=fmi.Forecast(self.now - timedelta(minutes=5), hours),
-            stops={w: hsl.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.stops, "ABC"))},
+            stops={w: hsl.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.wanted(hsl.StopRequest), "ABC"))},
         )
 
     def assert_panel_image(self, img):
@@ -798,15 +1118,38 @@ class RenderTest(unittest.TestCase):
         self.assert_panel_image(render.render(self.cfg, sc))
 
     def test_status_text(self):
-        self.assertEqual(render._status_warning(self.scene), None)
+        self.assertEqual(render._status_warnings(self.scene), [])
         live = replace(self.scene, departures_live=True, departures_fetched_at=self.now - timedelta(minutes=12))
         self.assertTrue(live.departures_stale)  # so the stops draw realtime times grey
         fresh = replace(live, departures_fetched_at=self.now - timedelta(seconds=40))
         self.assertFalse(fresh.departures_stale)
         # The status bar shows what the sources say, then its own warning.
         warned = replace(self.scene, warnings=("Weather 2 h old", "Departures 12 min old"), battery_percent=10)
-        self.assertEqual(render._status_warning(warned), "Weather 2 h old · Departures 12 min old · Charge battery")
+        self.assertEqual(render._status_warnings(warned), ["Weather 2 h old", "Departures 12 min old", "Charge battery"])
         self.assert_panel_image(render.render(self.cfg, replace(live, warnings=("Departures 12 min old",))))
+
+    def test_many_warnings_leave_the_date_and_clock_alone(self):
+        from PIL import Image, ImageDraw
+        every = {
+            "fi": ("Säätietoja ei saatavilla", "Lähtötietoja ei saatavilla", "Pörssisähkön hintaa ei saatavilla"),
+            "en": ("Weather unavailable", "Departures unavailable", "Spot price unavailable"),
+        }
+        for language, warnings in every.items():
+            quiet = replace(self.scene, language=language, battery_percent=5)  # "Charge battery" too
+            clock_end = 10 + draw.font("semibold", 17).getlength(
+                f"{i18n.date(language, quiet.now)}   {i18n.clock(language, quiet.now)}")
+            bars = []
+            for sc in (quiet, replace(quiet, warnings=warnings)):
+                img = Image.new("L", (render.W, render.BAR), 255)
+                render.draw_status_bar(img, ImageDraw.Draw(img), sc)
+                bars.append(img.crop((0, 0, round(clock_end) + render.PAGE_MARGIN, render.BAR)).tobytes())
+            with self.subTest(language=language):
+                self.assertEqual(bars[0], bars[1])
+        f = draw.font("semibold", 15)
+        self.assertEqual(render._fitting(["Weather unavailable", "Departures unavailable", "Charge battery"], f,
+                                         f.getlength("Weather unavailable +2")), "Weather unavailable +2")
+        self.assertEqual(render._fitting(["Weather unavailable", "Charge battery"], f, 1000),
+                         "Weather unavailable · Charge battery")  # what fits is shown as before
 
     def test_page_dots(self):
         from PIL import ImageChops
@@ -951,7 +1294,7 @@ class ScheduleTest(unittest.TestCase):
             path.write_text('[location]\nlat = 60.2\nlon = 24.9\n[screens.main]\ngrid = "a b"\n'
                             '[widgets.a]\ntype = "hsl_stops"\ncodes = [1234, "H0665"]\n'
                             '[widgets.b]\ntype = "hsl_stops"\ncode = 5678\n')
-            self.assertEqual([s.ids for s in config.load(path).stops.values()], [("1234", "H0665"), ("5678",)])  # text, not numbers
+            self.assertEqual([s.ids for s in config.load(path).wanted(hsl.StopRequest).values()], [("1234", "H0665"), ("5678",)])  # text, not numbers
             path.write_text(f'{MINIMAL}[server]\nhostnames = "Pi.Lan"\n')
             self.assertEqual(config.load(path).hostnames, ("pi.lan",))  # one name, not its letters
 
@@ -1168,8 +1511,8 @@ class BatteryTest(unittest.TestCase):
         now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
         sc = render.Scene(now=now, language="fi", forecast=fmi.Forecast(now, []),
                           stops={}, battery_percent=40)
-        self.assertIsNone(render._status_warning(sc))
-        self.assertEqual(render._status_warning(replace(sc, battery_percent=15)), "Lataa akku")
+        self.assertEqual(render._status_warnings(sc), [])
+        self.assertEqual(render._status_warnings(replace(sc, battery_percent=15)), ["Lataa akku"])
         self.assertEqual(i18n.percent("fi", 87), "87\u202f%")
         self.assertEqual(i18n.percent("en", 87), "87%")
 
@@ -1452,12 +1795,31 @@ class TransitTest(unittest.TestCase):
 
     def test_status_bar_lists_weather_then_departures(self):
         from glance.sources import Sources
-        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))], weather=True)
         sources = Sources.make(cfg)
         now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
         self.assertEqual(sources.warnings(now, "en"), ("Weather unavailable", "Departures unavailable"))
         sources.weather.forecast = fmi.Forecast(now, [])
         self.assertEqual(sources.warnings(now, "en"), ("Departures unavailable",))
+
+    def test_weather_no_screen_shows_is_not_fetched_or_warned_about(self):
+        from unittest import mock
+        from glance.sources import Sources
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])  # no weather widget
+        sources = Sources.make(cfg)
+        with mock.patch.object(fmi, "fetch", return_value=fmi.Forecast(datetime.now(UTC), [])) as fetch:
+            for source in sources.periodic:  # as the refresher and `render` do
+                source.refresh(force=True)
+        fetch.assert_not_called()
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+        self.assertEqual(sources.warnings(now, "en"), ("Departures unavailable",))
+
+    def test_departures_no_screen_shows_are_not_warned_about(self):
+        from glance.sources import Sources
+        cfg = isolated_config(self, digitransit_key="test", stops=[], weather=True)  # a key, but no stop widget
+        sources = Sources.make(cfg)
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+        self.assertEqual(sources.warnings(now, "en"), ("Weather unavailable",))
 
     def test_scene_warns_at_its_own_time_and_language(self):
         from glance.__main__ import scene

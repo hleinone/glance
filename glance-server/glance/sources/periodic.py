@@ -44,10 +44,12 @@ class Periodic(Generic[T]):
     def refresh(self, force: bool = False) -> None:
         now, tick = datetime.now(UTC), time.monotonic()
         with self.lock:
-            wait = min(self.interval, self.RETRY_AFTER) if self.last_failed else self.interval
+            value = self.value
+            # Sooner after a failure, or after an answer the source wouldn't fetch the same way now.
+            behind = self.last_failed or (value is not None and not self._current(value))
+            wait = min(self.interval, self.RETRY_AFTER) if behind else self.interval
             if not force and self.last_attempt is not None and tick - self.last_attempt < wait.total_seconds():
                 return
-            value = self.value
             # A cached answer "from the future" (the clock went back) is not fresh.
             if (not force and value is not None and self._current(value)
                     and timedelta(0) <= now - self._fetched_at(value) < self.interval):
