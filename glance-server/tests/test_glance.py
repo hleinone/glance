@@ -1,11 +1,14 @@
+import http.client
+import io
 import json
 import os
 import tempfile
 import unittest
-from unittest import mock
+import urllib.parse
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 from zoneinfo import ZoneInfo
 
 from glance import battery, config, decks, draw, i18n, layout, render, schedule, widgets
@@ -17,13 +20,14 @@ HELSINKI = ZoneInfo("Europe/Helsinki")
 
 
 def isolated_config(test: unittest.TestCase, stops: list[widgets.HslStops] | None = None, weather: bool = False,
-                    **changes) -> config.Config:
+                    spot: bool = False, **changes) -> config.Config:
     """config.toml alone (no config.local.toml, no environment), no key, and a
     cache folder of the test's own: tests must not depend on this machine's
     settings, reach the network or touch the real cache.
 
     stops: one screen of just these stop widgets, side by side (s0, s1, ...);
-    with weather, a current weather widget first."""
+    with weather, a current weather widget first; with spot, a spot price widget
+    last."""
     cache = Path(test.enterContext(tempfile.TemporaryDirectory()))
     cfg = config.load(local_overrides=False)
     if stops is not None:
@@ -32,6 +36,9 @@ def isolated_config(test: unittest.TestCase, stops: list[widgets.HslStops] | Non
         if weather:
             names.insert(0, "weather")
             changes["widgets"]["weather"] = widgets.FmiWeatherNow()
+        if spot:
+            names.append("spot")
+            changes["widgets"]["spot"] = widgets.SpotPrices()
         changes["screens"] = {"main": layout.parse(" ".join(names) or ".")}
         changes["decks"] = {"all": decks.Deck("all", ("main",), "main")}
         # The example's wake times, without its decks.
@@ -437,6 +444,129 @@ codes = "H0001"
         self.assertIsNone(hsl.stop_id_from_geocoding({}, "H0665"))
         self.assertTrue(hsl.is_gtfs_id("HSL:1174411"))
         self.assertFalse(hsl.is_gtfs_id("H0665"))
+
+
+class EleringTest(unittest.TestCase):
+    """Finland's spot prices from Elering, against answers written in its shape."""
+
+    # 2027-01-19 00:00 and 00:15 Finnish time, in Unix seconds.
+    T0, T1 = 1800309600, 1800310500
+
+    def answer(self, payload) -> bytes:
+        return json.dumps(payload).encode()
+
+    def test_finlands_prices_are_taken_and_the_other_areas_left(self):
+        body = self.answer({"success": True, "data": {
+            "ee": [{"timestamp": self.T0, "price": 999.0}],
+            "fi": [{"timestamp": self.T1, "price": 52.5}, {"timestamp": self.T0, "price": -3.25}],
+            "lv": [], "lt": [],
+        }})
+        prices = elering.parse(body)
+        self.assertEqual(prices, (
+            elering.Price(datetime(2027, 1, 19, 0, 0, tzinfo=HELSINKI).astimezone(UTC), -3.25),
+            elering.Price(datetime(2027, 1, 19, 0, 15, tzinfo=HELSINKI).astimezone(UTC), 52.5),
+        ))
+
+    def test_prices_that_cant_be_right_are_left_out(self):
+        body = b'{"success": true, "data": {"fi": [' + b", ".join([
+            b'{"timestamp": %d, "price": 40.0}' % self.T0,   # the one good price
+            b'{"timestamp": %d, "price": NaN}' % self.T1,
+            b'{"timestamp": %d, "price": Infinity}' % self.T1,
+            b'{"timestamp": %d, "price": 20000.0}' % self.T1,  # beyond any market limit
+            b'{"timestamp": %d, "price": "40"}' % self.T1,      # text, not a number
+            b'{"timestamp": %d, "price": true}' % self.T1,
+            b'{"timestamp": 0, "price": 40.0}',                 # 1970
+            b'{"timestamp": 99999999999999999999, "price": 40.0}',
+            b'{"price": 40.0}', b'"a string"', b'null',
+        ]) + b"]}}"
+        self.assertEqual([p.eur_per_mwh for p in elering.parse(body)], [40.0])
+
+    def test_any_bad_answer_is_an_elering_error(self):
+        for body in (b"<html>busy</html>", b"[]", self.answer({"success": False, "data": {}}),
+                     self.answer({"success": True, "data": {"ee": []}}),
+                     self.answer({"success": True, "data": {"fi": "none"}}),
+                     self.answer({"success": True, "data": []})):
+            with self.subTest(body=body), self.assertRaises(elering.EleringError):
+                elering.parse(body)
+        empty = self.answer({"success": True, "data": {"fi": []}})
+        with mock.patch("glance.upstream._open", return_value=io.BytesIO(empty)), \
+                self.assertRaises(elering.EleringError):
+            elering.fetch(HELSINKI, datetime.now(UTC))
+        with mock.patch("glance.upstream._open", side_effect=http.client.IncompleteRead(b"{")), \
+                self.assertRaises(elering.EleringError):
+            elering.fetch(HELSINKI, datetime.now(UTC))
+
+    def test_the_request_carries_only_dates_from_local_midnight(self):
+        body = self.answer({"success": True, "data": {"fi": [{"timestamp": self.T0, "price": 1.0}]}})
+        with mock.patch("glance.upstream._open", return_value=io.BytesIO(body)) as opened:
+            elering.fetch(HELSINKI, datetime(2027, 1, 19, 16, 42, tzinfo=HELSINKI))
+        url = urllib.parse.urlsplit(opened.call_args.args[0].full_url)
+        self.assertEqual(url.netloc, "dashboard.elering.ee")
+        self.assertEqual(urllib.parse.parse_qs(url.query), {
+            "start": ["2027-01-18T22:00:00.000Z"],  # midnight in Helsinki
+            "end": ["2027-01-20T21:59:59.999Z"],    # the end of tomorrow there
+        })
+
+    def test_the_source_keeps_its_last_good_prices(self):
+        from glance.sources.elering import Electricity
+        cfg = isolated_config(self, stops=[], spot=True)
+        now = datetime.now(UTC)
+        good = elering.Prices(now, (elering.Price(now - timedelta(minutes=5), 50.0),))
+        source = Electricity(cfg)
+        source.prices = good
+        with mock.patch("glance.upstream._open", return_value=io.BytesIO(b"<html>busy</html>")), \
+                self.assertLogs("glance", "WARNING"):
+            source.refresh(force=True)
+        self.assertIs(source.prices, good)
+        self.assertEqual(Electricity(cfg).prices, None)  # nothing was cached by the failure
+        with mock.patch.object(elering, "fetch", return_value=good):
+            source.refresh(force=True)
+        self.assertEqual(Electricity(cfg).prices, good)  # a restart starts from the cache
+
+    def test_prices_that_dont_cover_now_are_fetched_again_at_once(self):
+        from glance.sources.elering import Electricity
+        cfg = isolated_config(self, stops=[], spot=True)
+        now = datetime.now(UTC)
+        source = Electricity(cfg)
+        fresh = elering.Prices(now, (elering.Price(now - timedelta(minutes=5), 50.0),))
+        with mock.patch.object(elering, "fetch", return_value=fresh) as fetch:
+            source.refresh()
+            source.refresh()  # covers now, fetched a moment ago: not again within the hour
+        self.assertEqual(fetch.call_count, 1)
+        ended = elering.Prices(now, (elering.Price(now - timedelta(hours=2), 50.0),))  # fetched now, but over
+        source = Electricity(cfg)
+        source.prices = ended
+        with mock.patch.object(elering, "fetch", return_value=fresh) as fetch:
+            source.refresh()
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_status_bar_says_when_there_is_no_price_for_now(self):
+        from glance.sources import Sources
+        cfg = isolated_config(self, stops=[], spot=True)
+        sources = Sources.make(cfg)
+        now = datetime(2027, 1, 19, 16, 42, tzinfo=HELSINKI)
+        self.assertEqual(sources.warnings(now, "en"), ("Spot price unavailable",))
+        self.assertEqual(sources.warnings(now, "fi"), ("Pörssisähkön hintaa ei saatavilla",))
+        start = datetime(2027, 1, 19, 16, 30, tzinfo=HELSINKI).astimezone(UTC)
+        sources.electricity.prices = elering.Prices(start - timedelta(days=1), (elering.Price(start, 50.0),))
+        self.assertEqual(sources.warnings(now, "en"), ())  # a day-old fetch, but its price covers now
+        self.assertEqual(sources.warnings(now + timedelta(minutes=15), "en"), ("Spot price unavailable",))
+
+    def test_without_a_spot_price_widget_nothing_is_fetched_or_warned_about(self):
+        from glance.sources import Sources
+        cfg = isolated_config(self, stops=[], weather=True)
+        sources = Sources.make(cfg)
+        self.assertNotIn(sources.electricity, sources.periodic)  # the refresher and `render` leave it
+        self.assertEqual(sources.warnings(datetime(2027, 1, 19, 16, 42, tzinfo=HELSINKI), "en"), ("Weather unavailable",))
+
+    def test_the_scene_carries_the_prices_to_the_widget(self):
+        from glance.__main__ import scene
+        from glance.sources import Sources
+        cfg = isolated_config(self, stops=[], spot=True)
+        sources = Sources.make(cfg)
+        prices = elering.Prices(datetime.now(UTC), (elering.Price(datetime.now(UTC), 50.0),))
+        sources.electricity.prices = prices
+        self.assertIs(scene(cfg, sources).spot_prices, prices)
 
 
 class SourcesTest(unittest.TestCase):

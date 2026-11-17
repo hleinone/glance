@@ -47,6 +47,7 @@ def scene(
         battery_percent=device_battery.level(now) if device_battery else None,
         departure_clock=interval_minutes > 1,
         warnings=warnings,
+        spot_prices=sources.electricity.prices,
     )
 
 

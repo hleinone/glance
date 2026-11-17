@@ -17,6 +17,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 from . import fmi, hsl
+from .elering import Electricity
 from .fmi import Weather
 from .hsl import Transit
 from .periodic import Periodic
@@ -45,15 +46,16 @@ class Sources:
 
     weather: Weather
     transit: Transit
+    electricity: Electricity
 
     @classmethod
     def make(cls, cfg: Config) -> Sources:
-        return cls(Weather(cfg), Transit(cfg))
+        return cls(Weather(cfg), Transit(cfg), Electricity(cfg))
 
     @property
     def periodic(self) -> tuple[Periodic, ...]:
         """The sources refreshed on their own intervals, of those a widget asks for."""
-        return tuple(source for source in (self.weather,) if source.wanted)
+        return tuple(source for source in (self.weather, self.electricity) if source.wanted)
 
     def warnings(self, now: datetime, language: str) -> tuple[str, ...]:
         """What the sources a widget asks for say is old or missing, in the order of the fields."""
