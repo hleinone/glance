@@ -47,12 +47,11 @@ Lessons:
 - Use falling edges, never the pin's level: the display driver blocks interrupts for long stretches, so the handler can run after the button is released.
 - The button that woke the device is ignored for its first second (its release bounces).
 
-## Marks in the status bar
+## The offline mark
 
-The device draws two marks itself, as a white badge at the right end of the status bar (x 704–800, over the battery level), with a black-and-white partial refresh (~1.1 s) that leaves the rest of the image alone:
+The device draws one mark itself, as a white badge at the right end of the status bar (x 704–800, over the battery level), with a black-and-white partial refresh (~1.1 s) that leaves the rest of the image alone: **offline** (a crossed-out cloud), from the third failed update in a row, and at once when a press fails, since the press's sound promised a change; once per outage. The next full refresh replaces it. There is no text because the built-in fonts have no ä or ö.
 
-- **Refreshing** (two circling arrows): at once on a press, since the new image takes about 10 s to appear. Wi-Fi starts first and connects meanwhile, so the mark costs no time awake. Not on timed wakes: it would flash the corner at every one.
-- **Offline** (a crossed-out cloud): from the third failed update in a row, once per outage; and at once when the refreshing mark is up, since that can't be left there. The next full refresh replaces it. There is no text because the built-in fonts have no ä or ö.
+A press draws no mark of its own: its sound says it was heard (GL-3), which costs no partial refresh and doesn't flash the corner at every press. A press answered `204` therefore leaves the panel as it is.
 
 Partial refresh works only in 1-bit mode (`deinitGrayMode()`). `push_mark()` runs the library's own sequence and also sends the inverse of the new image as the "old" one: the controller drives only the pixels that differ between the two, and what it held as "old" after a 4-grey refresh left smoothed edges undriven, which made the mark smudgy. It bypasses the library's sleep flag on purpose.
 
@@ -69,5 +68,4 @@ Partial refresh works only in 1-bit mode (`deinitGrayMode()`). `push_mark()` run
 ## Not yet tried on the device
 
 - A press whose request the server answered but whose image then failed: the retry should not carry a white button (the server already stepped), and should carry the green one.
-- A white press answered `204` while the refreshing mark is up (the deck shrank to one screen since the last update): the device should fetch the image again to replace the mark.
 - A frame buffer that wasn't allocated (it needs a test build).

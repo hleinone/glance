@@ -5,9 +5,9 @@
 // ones on the left step through the server's deck of screens (?button=prev,
 // ?button=next), the green one on the right asks for fresh data
 // (?button=refresh). The battery voltage goes along with every request
-// (?battery_mv=), and the server draws the level. An update for a press first
-// draws a small "refreshing" mark in the status bar, since the new image takes
-// 8 s or more to appear.
+// (?battery_mv=), and the server draws the level. A press is answered at once
+// with a sound from the buzzer, since the new image takes 8 s or more to
+// appear.
 //
 // The image comes as /glance.g2: the panel's own 4 greys at 2 bits per pixel
 // (4 pixels per byte, first pixel in the top bits, 0 = black .. 3 = white =
@@ -73,7 +73,7 @@ static constexpr int SHORT_SLEEP_S = 10;
 static constexpr uint8_t SHORT_SLEEPS_ALLOWED = 2;
 RTC_DATA_ATTR static uint8_t short_sleeps = 0;  // in a row, kept across deep sleep
 // The longest the device stays awake. A normal update takes ~9 s, the worst
-// one (slow Wi-Fi, two fetches, both marks) under a minute. Without a limit,
+// one (slow Wi-Fi, the offline mark) under a minute. Without a limit,
 // anything that never returns keeps it awake until the battery is flat: the
 // display library waits for the panel's BUSY line with no timeout (its
 // CHECK_BUSY), so a panel that stopped answering would do that. At the limit
@@ -191,8 +191,8 @@ RTC_DATA_ATTR static uint8_t ap_bssid[6] = {};
 
 static uint32_t wifi_start = 0;
 
-// Start connecting. It carries on in the background, so the refreshing mark
-// can be drawn meanwhile; connect_wifi() waits for the result.
+// Start connecting. It carries on in the background while the frame buffer
+// is set up; connect_wifi() waits for the result.
 static void start_wifi() {
   wifi_start = millis();
   WiFi.mode(WIFI_STA);
@@ -334,15 +334,14 @@ static Fetch fetch_and_draw(int battery_mv, Button button) {
   return result;
 }
 
-// --- status bar marks -----------------------------------------------------------------
+// --- the offline mark -----------------------------------------------------------------
 
-// Two marks are drawn by the device itself, both as a white badge at the right
-// end of the status bar (black on the server's image, where the battery level
-// is), with a partial refresh that leaves the rest of the screen as it is:
-// "refreshing" (two circling arrows) when an update asks for fresh data, and
-// "offline" (a crossed-out cloud) after failed updates. Partial refresh works
-// only in black and white on this panel, so they are drawn in a 1-bit frame
-// buffer. The next successful update redraws everything.
+// The offline mark is drawn by the device itself, as a white badge at the
+// right end of the status bar (black on the server's image, where the battery
+// level is), with a partial refresh that leaves the rest of the screen as it
+// is: a crossed-out cloud, after failed updates. Partial refresh works only in
+// black and white on this panel, so it is drawn in a 1-bit frame buffer. The
+// next successful update redraws everything.
 static constexpr int MARK_X = 704, MARK_W = 96, MARK_H = 30;  // x and width multiples of 8
 
 static void thick_line(int x0, int y0, int x1, int y1, float w, uint32_t color) {
@@ -361,17 +360,6 @@ static void draw_offline_icon() {
   epaper.fillRect(762, 17, 16, 6, TFT_BLACK);
   thick_line(758, 24, 782, 6, 6, TFT_WHITE);
   thick_line(758, 24, 782, 6, 2.5, TFT_BLACK);
-}
-
-// Two arrows chasing each other round a ring centred at (770, 15): a ring,
-// two gaps cut into it, and an arrowhead at the clockwise end of each half.
-static void draw_refresh_icon() {
-  epaper.fillCircle(770, 15, 9, TFT_BLACK);
-  epaper.fillCircle(770, 15, 6, TFT_WHITE);
-  thick_line(770, 15, 781, 19, 6, TFT_WHITE);
-  thick_line(770, 15, 759, 11, 6, TFT_WHITE);
-  epaper.fillTriangle(773, 14, 782, 12, 779, 19, TFT_BLACK);
-  epaper.fillTriangle(767, 16, 758, 18, 761, 11, TFT_BLACK);
 }
 
 // The library's panel sequences are macros written for its own member
@@ -408,22 +396,21 @@ static void push_mark(const uint8_t *fb) {
   EPD_SLEEP();
 }
 
-// Draw a mark on the panel; false if it couldn't be drawn. Ends with the panel
-// asleep and the frame buffer in 1-bit mode.
-static bool show_mark(void (*draw_icon)(), const char *name) {
+// Draw the offline mark on the panel. Ends with the panel asleep and the frame
+// buffer in 1-bit mode.
+static void show_offline_mark() {
   epaper.deinitGrayMode();  // 1-bit frame buffer
   const auto *fb = static_cast<const uint8_t *>(epaper.getPointer());
   if (!fb) {
-    LOG.printf("[epd] no frame buffer for the %s mark\n", name);
-    return false;
+    LOG.println("[epd] no frame buffer for the offline mark");
+    return;
   }
   epaper.fillRect(MARK_X, 0, MARK_W, MARK_H, TFT_BLACK);
   epaper.fillRoundRect(744, 4, 52, 22, 4, TFT_WHITE);
-  draw_icon();
+  draw_offline_icon();
   const uint32_t start = millis();
   push_mark(fb);
-  LOG.printf("[epd] %s mark drawn in %lu ms\n", name, millis() - start);
-  return true;
+  LOG.printf("[epd] offline mark drawn in %lu ms\n", millis() - start);
 }
 
 // Power the panel down when there is nothing to draw. begin() switches the
@@ -645,23 +632,10 @@ void setup() {
   if (pressed_now) play_press_sound(button);
   epaper.begin();
   start_wifi();
-  // A press takes a while to show (the server draws, then the panel's 6 s
-  // refresh): show at once that it was noticed. Wi-Fi connects meanwhile, so
-  // this costs little or no extra time awake.
-  const bool refresh_mark = button != NO_BUTTON && show_mark(draw_refresh_icon, "refreshing");
   epaper.initGrayMode(GRAY_LEVEL4);
 
   Fetch fetch;
-  if (connect_wifi()) {
-    fetch = fetch_and_draw(battery_mv, button);
-    if (fetch.no_change && refresh_mark) {
-      // The deck turned out to have one screen after all (it changed since the
-      // last update), and the mark is up with nothing under it: fetch the
-      // image as a timed wake would, to replace it.
-      LOG.println("[glance] mark up but nothing changed: fetching the image to replace it");
-      fetch = fetch_and_draw(battery_mv, NO_BUTTON);
-    }
-  }
+  if (connect_wifi()) fetch = fetch_and_draw(battery_mv, button);
   if (fetch.no_change) {
     // Nothing to draw: the panel keeps its image. Sleep as the server said.
     if (failures) LOG.printf("[glance] back online after %lu failed updates\n", (unsigned long)failures);
@@ -684,10 +658,11 @@ void setup() {
       WiFi.disconnect(true);
       WiFi.mode(WIFI_OFF);
     }
-    // The refreshing mark can't be left up, and what was under it is gone, so
-    // a failed refresh shows the offline mark at once.
-    if (refresh_mark || (failures >= OFFLINE_MARK_AFTER && !offline_mark_shown)) {
-      show_mark(draw_offline_icon, "offline");  // ends with the panel asleep
+    // A press heard its sound and waits for the screen to change, so a failed
+    // one shows the offline mark at once; otherwise from the third failure in
+    // a row. Once per outage: it stays up until a full refresh replaces it.
+    if (!offline_mark_shown && (button != NO_BUTTON || failures >= OFFLINE_MARK_AFTER)) {
+      show_offline_mark();  // ends with the panel asleep
       offline_mark_shown = true;
     } else {
       panel_off();
