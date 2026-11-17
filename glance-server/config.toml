@@ -91,7 +91,7 @@ trams   trams   buses  buses  trains trains
 grid = """
 hours hours hours hours hours hours
 trams trams trams buses buses buses
-trams trams trams buses buses buses
+spot  spot  spot  spot  spot  spot
 """
 
 [decks.day]
@@ -144,6 +144,10 @@ deck = "night"
 #              (Digitransit ids like "HSL:1174411" also work, as `ids`.)
 #     routes = optional filter, e.g. ["7", "9"]; omit for all routes
 #     Without codes (or with no key configured) it shows placeholder departures.
+#   spot_prices         Finland's electricity spot price with VAT: the price for the
+#                       quarter hour now, and a bar per quarter hour for the next
+#                       24 hours, the cheapest hour in black (530×120). Prices from
+#                       Nord Pool's day-ahead market via Elering (no key).
 
 [widgets.weather]
 type = "fmi_weather_now"
@@ -165,3 +169,6 @@ codes = ["H2100", "H2101"]
 type = "hsl_stops"
 name = "Pasila, junat"
 codes = ["H0086"]
+
+[widgets.spot]
+type = "spot_prices"

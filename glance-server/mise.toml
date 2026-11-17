@@ -41,7 +41,7 @@ depends = ["test"]
 run = 'deploy/deploy.sh "${GLANCE_PI:?set GLANCE_PI (user@host) in mise.local.toml, see mise.local.toml.example}"'
 
 [tasks.screenshot]
-description = "Render the README screenshot (../docs/screenshot.png) from sample data"
+description = "Render the README screenshots (../docs/screenshot*.png) from sample data"
 run = "python tools/make_screenshot.py"
 
 [tasks.icons]
