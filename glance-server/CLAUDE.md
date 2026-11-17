@@ -17,7 +17,7 @@ mise run screenshot              # ../docs/screenshot.png, from sample data
 mise run icons                   # rebuild the icon PNGs (macOS only)
 ```
 
-On the Pi: `journalctl --user-unit glance -f` for the log (`journalctl --user -u` finds nothing there), `systemctl --user restart glance`.
+On the Pi: `journalctl --user-unit glance -f` for the log (`journalctl --user -u` finds nothing there), `systemctl --user restart glance`. The server's own warnings reach the journal as ordinary lines, so look for them with `grep -E 'WARNING|ERROR|Traceback'`: `journalctl -p warning` doesn't show them.
 
 ## Code
 
@@ -81,7 +81,7 @@ Both clients were verified against the live APIs; `tests/data/` has a real answe
 - A widget (`[widgets.<name>]`) has a `type`, named for its look. The type knows its data provider, so the config never names one. The types are `fmi_weather_now`, `fmi_weather_hourly` and `hsl_stops`.
 - Each type is one module in `glance/widgets/` holding everything about it: `TYPE`, `SETTINGS`, `parse()`, its fill rule and `draw()`. `widgets/__init__.py` lists them by hand; adding a type is a module and a line there. Drawing every widget can use goes in `draw.py`, never in another widget's module. Pictures one widget draws stay in its module (HSL's mode pictograms in `hsl_stops.py`, the wind arrow in `fmi_weather_now.py`); pictures a family of widgets shares get a module named for them (`fmi_symbols.py`, for the two FMI weather widgets). A widget never fetches: its data comes from a source in `glance/sources/` through the scene, and a new provider is a new module there (`Periodic` if it is refreshed on an interval), a field in `Sources` (and in its `periodic` list) with a `warning()` for the status bar, and a field in `Scene` with its line in `scene()`.
 - Widgets fill their rectangle: as many hourly columns as fit at 41 px, as many departure rows as fit at 32 px. Current weather keeps its one design, at the top left of a bigger area.
-- Minimum sizes are in pixels, since the same cells are a different size in another grid (`MIN_SIZE`: current weather 245×140, hourly 139×130, stops 200×72). They were chosen by drawing worst-case data. A grid that gives a widget less fails at load, saying what to change ("give it 3 columns"). `WidgetSizeTest` draws every type with worst-case data at several sizes and fails if anything lands outside its rectangle.
+- Minimum sizes are in pixels, since the same cells are a different size in another grid (`MIN_SIZE`: current weather 245×140, hourly 139×130, stops 200×72). They were chosen by drawing worst-case data. A grid that gives a widget less fails at load, saying what to change ("give it 3 columns"). `WidgetSizeTest` draws every type with worst-case data at several sizes and fails if anything lands outside its rectangle. On the panel, within a few pixels of them (250×141, 139×131 and 200×72: 5×5 cells of a 16×16 grid, 4×9 of 23×31, 1×4 of 4×25), each read well with real data; the worst-case data was drawn only in the tests.
 - A deck (`[decks.<name>]`) is an ordered list of screens with a `start`; without decks, all screens form one. The schedule picks the deck. `decks.Selection` (in memory, shared by the device and the preview) keeps the showing screen across wakes, and starts over only when the schedule switches decks or the server restarts.
 - `?button=prev|next` step through the deck, wrapping around. On a deck of one the answer is `204` with `X-Glance-Sleep`. Answers carry `X-Glance-Deck-Size` (the device skips a pointless press) and `X-Glance-Screen` (for the preview).
 
@@ -118,11 +118,11 @@ The README screenshot is drawn from sample data by `tools/make_screenshot.py`: a
 
 1. rsyncs the code to `~/glance-server` and copies `config.local.toml` with mode 600;
 2. makes a venv with `--system-site-packages` and compiles the modules (the sandboxed service can't);
-3. draws one image with the new code and config; if that fails, the old service is left running;
+3. draws one image with the new code and config; if that fails, the deploy stops and the old service is left running, but the new code and config are already in place, so the service's next restart loads them (an open fault, in the root file);
 4. installs and restarts the systemd **user** service (no sudo; linger makes it start at boot);
-5. fails if the service isn't up, or has restarted, 12 s later (the code takes ~4 s to load on the Pi).
+5. fails if the service isn't up, or has restarted, 12 s later (the code takes ~4 s to load on the Pi). This is what catches a config that draws but can't serve, such as a port below 1024 (`PermissionError` in the log), but only after the restart: the service is then down, restarting every 10 s, until a good deploy (an open fault, in the root file). Its "restarts: 0" can show while the service is failing, between two attempts.
 
-The unit waits up to 2 minutes for network time (the Pi has no clock of its own), then starts anyway; `TimeoutStartSec=150` keeps systemd's 90 s start limit from ending that wait as a failure.
+The unit waits up to 2 minutes for network time (the Pi has no clock of its own), then starts anyway; `TimeoutStartSec=150` keeps systemd's 90 s start limit from ending that wait as a failure. With the network out at boot, the service starts when the wait runs out and serves the cached weather, with no departures until the network is back. Until the first sync the clock starts from the time `systemd-timesyncd` last saved, so it runs behind by at least as long as the Pi was off (from its design; the clock's value before the sync wasn't looked at).
 
 Choices made because the server is a Pi 1 (revisit on other hardware; no switches in advance): images are drawn ahead; `poll_lead_seconds` is 15 (5 would do on fast hardware); PNGs use `compress_level=6` (0.16 s against 1.1 s for `optimize=True`); Pillow is Debian's `python3-pil` (piwheels' ARMv6 wheel lacked system libraries), which is why `Pillow>=9.1` is a range and not a pin. To judge new hardware, time `render.render` and `render.to_png` there.
 
@@ -147,7 +147,7 @@ Within the model in the root file. Keep them when changing the code around them.
 
 Built and tested, but not seen happening on the running system:
 
-- A boot without network time, and the deploy script's failure paths.
-- The refusal of a public address (it needs a request from one).
-- The minimum widget sizes on the panel.
+- The refusal of a public address. It needs a request from one, and was left untried on purpose: the tests cover it, and trying it means giving the Pi a public address.
 - The battery curve's low end: `full_mv` shifts readings by a constant, which may not hold where the warning appears.
+- Running since 2026-11-16 but not seen happening yet: a renumbered stop keeping its old id until the new one is found, and a widget that can't be drawn left empty (each logs a warning or an error when it happens); the parsers leaving out values they can't draw, and a departures fetch still running after a request stopped waiting for it (neither logs anything).
+- The deploy's one-time setup check and its linger warning: trying them means undoing the Pi's setup.
