@@ -52,12 +52,13 @@ class Sources:
 
     @property
     def periodic(self) -> tuple[Periodic, ...]:
-        """The sources refreshed on their own intervals."""
-        return (self.weather,)
+        """The sources refreshed on their own intervals, of those a widget asks for."""
+        return tuple(source for source in (self.weather,) if source.wanted)
 
     def warnings(self, now: datetime, language: str) -> tuple[str, ...]:
-        """What the sources say is old or missing, in the order of the fields."""
-        found = (getattr(self, f.name).warning(now, language) for f in fields(self))
+        """What the sources a widget asks for say is old or missing, in the order of the fields."""
+        wanted = (source for f in fields(self) if (source := getattr(self, f.name)).wanted)
+        found = (source.warning(now, language) for source in wanted)
         return tuple(w for w in found if w)
 
     def data_times(self) -> tuple[datetime | None, ...]:

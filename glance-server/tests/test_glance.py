@@ -15,17 +15,22 @@ DATA = Path(__file__).parent / "data"
 HELSINKI = ZoneInfo("Europe/Helsinki")
 
 
-def isolated_config(test: unittest.TestCase, stops: list[widgets.HslStops] | None = None, **changes) -> config.Config:
+def isolated_config(test: unittest.TestCase, stops: list[widgets.HslStops] | None = None, weather: bool = False,
+                    **changes) -> config.Config:
     """config.toml alone (no config.local.toml, no environment), no key, and a
     cache folder of the test's own: tests must not depend on this machine's
     settings, reach the network or touch the real cache.
 
-    stops: one screen of just these stop widgets, side by side (s0, s1, ...)."""
+    stops: one screen of just these stop widgets, side by side (s0, s1, ...);
+    with weather, a current weather widget first."""
     cache = Path(test.enterContext(tempfile.TemporaryDirectory()))
     cfg = config.load(local_overrides=False)
     if stops is not None:
         names = [f"s{i}" for i in range(len(stops))]
         changes["widgets"] = dict(zip(names, stops))
+        if weather:
+            names.insert(0, "weather")
+            changes["widgets"]["weather"] = widgets.FmiWeatherNow()
         changes["screens"] = {"main": layout.parse(" ".join(names) or ".")}
         changes["decks"] = {"all": decks.Deck("all", ("main",), "main")}
         # The example's wake times, without its decks.
@@ -407,11 +412,12 @@ codes = "H0001"
                 self.assertEqual(config.load(path).source_settings.transit.key, "from-env")
                 self.assertEqual(config.load(path, local_overrides=False).source_settings.transit.key, None)
         self.assertEqual(cfg.source_settings.transit.key, "secret")
-        self.assertEqual(list(cfg.stops), ["one", "two", "three", "four"])  # layout order; unused left out
-        self.assertEqual(cfg.stops["one"], widgets.HslStops("One", ("HSL:1",), frozenset({"7", "9"})))
-        self.assertEqual(cfg.stops["two"].ids, ("HSL:2", "HSL:3"))
-        self.assertEqual(cfg.stops["three"].ids, ("H0665", "H0664"))
-        self.assertEqual(cfg.stops["four"], widgets.HslStops("", ("H0664",)))
+        stops = cfg.wanted(hsl.StopRequest)  # what the stop widgets ask the departures source for
+        self.assertEqual(list(stops), ["one", "two", "three", "four"])  # layout order; unused left out
+        self.assertEqual(stops["one"], hsl.StopRequest("One", ("HSL:1",), frozenset({"7", "9"})))
+        self.assertEqual(stops["two"].ids, ("HSL:2", "HSL:3"))
+        self.assertEqual(stops["three"].ids, ("H0665", "H0664"))
+        self.assertEqual(stops["four"], hsl.StopRequest("", ("H0664",)))
         self.assertEqual(cfg.widgets["now"], widgets.FmiWeatherNow())
 
     def test_stop_code_from_geocoding(self):
@@ -639,7 +645,7 @@ class LayoutTest(unittest.TestCase):
             local = Path(d) / "config.local.toml"
             local.write_text('[screens.mine]\ngrid = "trams"\n[widgets.trams]\ntype = "hsl_stops"\ncodes = ["H0086"]\n')
             cfg = config.load(path)
-            self.assertEqual(cfg.stops, {"trams": widgets.HslStops("", ("H0086",))})  # no example name leaked
+            self.assertEqual(cfg.wanted(hsl.StopRequest), {"trams": hsl.StopRequest("", ("H0086",))})  # no example name leaked
             self.assertEqual(list(cfg.screens), ["mine"])
             self.assertEqual(cfg.decks, {"all": decks.Deck("all", ("mine",), "mine")})  # no example deck
             # No example rule pointing at an example deck, nor its intervals.
@@ -765,7 +771,7 @@ class RenderTest(unittest.TestCase):
             now=self.now,
             language="en",
             forecast=fmi.Forecast(self.now - timedelta(minutes=5), hours),
-            stops={w: hsl.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.stops, "ABC"))},
+            stops={w: hsl.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.wanted(hsl.StopRequest), "ABC"))},
         )
 
     def assert_panel_image(self, img):
@@ -954,7 +960,7 @@ class ScheduleTest(unittest.TestCase):
             path.write_text('[location]\nlat = 60.2\nlon = 24.9\n[screens.main]\ngrid = "a b"\n'
                             '[widgets.a]\ntype = "hsl_stops"\ncodes = [1234, "H0665"]\n'
                             '[widgets.b]\ntype = "hsl_stops"\ncode = 5678\n')
-            self.assertEqual([s.ids for s in config.load(path).stops.values()], [("1234", "H0665"), ("5678",)])  # text, not numbers
+            self.assertEqual([s.ids for s in config.load(path).wanted(hsl.StopRequest).values()], [("1234", "H0665"), ("5678",)])  # text, not numbers
             path.write_text(f'{MINIMAL}[server]\nhostnames = "Pi.Lan"\n')
             self.assertEqual(config.load(path).hostnames, ("pi.lan",))  # one name, not its letters
 
@@ -1455,12 +1461,31 @@ class TransitTest(unittest.TestCase):
 
     def test_status_bar_lists_weather_then_departures(self):
         from glance.sources import Sources
-        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))], weather=True)
         sources = Sources.make(cfg)
         now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
         self.assertEqual(sources.warnings(now, "en"), ("Weather unavailable", "Departures unavailable"))
         sources.weather.forecast = fmi.Forecast(now, [])
         self.assertEqual(sources.warnings(now, "en"), ("Departures unavailable",))
+
+    def test_weather_no_screen_shows_is_not_fetched_or_warned_about(self):
+        from unittest import mock
+        from glance.sources import Sources
+        cfg = isolated_config(self, digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])  # no weather widget
+        sources = Sources.make(cfg)
+        with mock.patch.object(fmi, "fetch", return_value=fmi.Forecast(datetime.now(UTC), [])) as fetch:
+            for source in sources.periodic:  # as the refresher and `render` do
+                source.refresh(force=True)
+        fetch.assert_not_called()
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+        self.assertEqual(sources.warnings(now, "en"), ("Departures unavailable",))
+
+    def test_departures_no_screen_shows_are_not_warned_about(self):
+        from glance.sources import Sources
+        cfg = isolated_config(self, digitransit_key="test", stops=[], weather=True)  # a key, but no stop widget
+        sources = Sources.make(cfg)
+        now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
+        self.assertEqual(sources.warnings(now, "en"), ("Weather unavailable",))
 
     def test_scene_warns_at_its_own_time_and_language(self):
         from glance.__main__ import scene

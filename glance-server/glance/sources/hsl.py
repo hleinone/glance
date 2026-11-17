@@ -294,6 +294,16 @@ def resolve_code(code: str, key: str) -> str | None:
 
 
 @dataclass(frozen=True)
+class StopRequest:
+    """What a stop widget asks this source for: one stop or several merged (both
+    platforms, say), by the code on the sign ("H0665") or Digitransit's id
+    ("HSL:1174411"), and which routes to show (all, if none)."""
+    name: str = ""  # "" = HSL's name for the stop
+    ids: tuple[str, ...] = ()
+    routes: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
 class StopQuery:
     """One stop widget: one or more stop ids (e.g. both platforms), optional route filter."""
     ids: tuple[str, ...]
@@ -415,7 +425,8 @@ class Transit:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.settings = cfg.source_settings.transit
-        self.configured = [name for name, s in cfg.stops.items() if s.ids]
+        self.asked_for = cfg.wanted(StopRequest)  # by stop widget name
+        self.configured = [name for name, s in self.asked_for.items() if s.ids]
         self.live = bool(self.settings.key and self.configured)
         if not self.settings.key:
             log.info("no Digitransit key configured: showing placeholder departures")
@@ -449,7 +460,7 @@ class Transit:
 
     def _resolve_codes(self) -> None:
         codes = {
-            ref.upper() for s in self.cfg.stops.values() for ref in s.ids
+            ref.upper() for s in self.asked_for.values() for ref in s.ids
             if not is_gtfs_id(ref) and ref.upper() not in self.code_ids and ref.upper() not in self.unknown_codes
         } | self.stale_codes
         if not codes:
@@ -478,7 +489,7 @@ class Transit:
             log.warning("could not save the stop codes: %s", e)
 
     def _query(self, name: str) -> StopQuery:
-        stop = self.cfg.stops[name]
+        stop = self.asked_for[name]
         # .get, not a check and then a lookup: the fetch thread changes
         # code_ids while requests read it.
         found = (ref if is_gtfs_id(ref) else self.code_ids.get(ref.upper()) for ref in stop.ids)
@@ -577,11 +588,16 @@ class Transit:
         kept from before couldn't be shown."""
         for code, stop_id in list(self.code_ids.items()):
             if stop_id not in by_stop and code not in self.rechecked_codes and any(
-                code == ref.upper() for s in self.cfg.stops.values() for ref in s.ids
+                code == ref.upper() for s in self.asked_for.values() for ref in s.ids
             ):
                 log.warning("stop %s (%s) is unknown to HSL; looking the code up again", code, stop_id)
                 self.rechecked_codes.add(code)
                 self.stale_codes.add(code)
+
+    @property
+    def wanted(self) -> bool:
+        """Whether a widget on a screen asks for departures."""
+        return bool(self.asked_for)
 
     def warning(self, now: datetime, language: str) -> str | None:
         """For the status bar: that live departures are missing or old, else None."""
@@ -598,7 +614,7 @@ class Transit:
         with self.lock:
             by_stop, names, modes = self.by_stop, self.names, self.modes
         out = {}
-        for i, (widget, stop) in enumerate(self.cfg.stops.items()):
+        for i, (widget, stop) in enumerate(self.asked_for.items()):
             if self.live and widget in self.configured:
                 query = self._query(widget)
                 out[widget] = StopDepartures(
@@ -612,7 +628,7 @@ class Transit:
         return out
 
     @staticmethod
-    def _name(stop, query: StopQuery, names: dict[str, str]) -> str:
+    def _name(stop: StopRequest, query: StopQuery, names: dict[str, str]) -> str:
         """The configured name, else HSL's name for the stop, else its code until known."""
         if stop.name:
             return stop.name

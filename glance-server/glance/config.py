@@ -6,6 +6,7 @@ import ipaddress
 import os
 import tomllib
 from dataclasses import dataclass
+from typing import TypeVar
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -14,10 +15,12 @@ from . import widgets as widgets_
 from .checks import within
 from .decks import Deck
 from .sources import SourceSettings
-from .widgets import HslStops, Widget
+from .widgets import Widget
 from .schedule import DAY_NAMES, WakeRule, WakeSchedule
 
 ROOT = Path(__file__).resolve().parent.parent
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -42,10 +45,10 @@ class Config:
     wake_offset_seconds: float = 2
     battery_full_mv: int = 4200  # what this device reads for a full battery
 
-    @property
-    def stops(self) -> dict[str, HslStops]:
-        """The stop widgets on any screen, by name, in screen and layout order."""
-        return {n: w for lay in self.screens.values() for n in lay.names if isinstance(w := self.widgets[n], HslStops)}
+    def wanted(self, kind: type[T]) -> dict[str, T]:
+        """What the widgets on any screen ask a source for, of this kind (the
+        source's own type), by widget name, in screen and layout order."""
+        return {n: r for lay in self.screens.values() for n in lay.names if isinstance(r := self.widgets[n].wants, kind)}
 
     @property
     def start_screen(self) -> str:

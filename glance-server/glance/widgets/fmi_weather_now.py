@@ -15,6 +15,7 @@ from .. import i18n
 from ..draw import BLACK, DARK, Pen, font, fit_text, fmt_temp, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
+from ..sources.fmi import ForecastRequest
 from .fmi_symbols import symbol_info, weather_icon
 
 TYPE = "fmi_weather_now"
@@ -28,6 +29,7 @@ SETTINGS: set[str] = set()  # besides `type`
 @dataclass(frozen=True)
 class FmiWeatherNow:
     TYPE: ClassVar[str] = TYPE
+    wants: ClassVar[ForecastRequest] = ForecastRequest()
     MIN_SIZE: ClassVar[tuple[int, int]] = (245, 140)  # "−29°" untruncated next to the high/low
 
 

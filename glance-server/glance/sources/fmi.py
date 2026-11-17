@@ -37,6 +37,11 @@ class Settings:
     stale_after_minutes: int = 45
 
 
+@dataclass(frozen=True)
+class ForecastRequest:
+    """What a weather widget asks this source for: the forecast at [location]."""
+
+
 def parse_settings(raw: dict) -> Settings:
     return Settings(
         refresh_minutes=within(raw.get("refresh_minutes", 15), 1, 24 * 60, "[fmi] refresh_minutes"),
@@ -271,6 +276,8 @@ class Weather(Periodic[Forecast]):
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        # Only fetched, and only warned about, while a widget on a screen asks for it.
+        self.wanted = bool(cfg.wanted(ForecastRequest))
         settings = cfg.source_settings.weather
         self.stale_after = timedelta(minutes=settings.stale_after_minutes)
         super().__init__(timedelta(minutes=settings.refresh_minutes), cfg.cache_dir / "forecast.json")
