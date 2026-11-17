@@ -689,22 +689,17 @@ class SpotPricesTest(unittest.TestCase):
     def test_bars_cover_the_next_24_hours_from_the_quarter_now(self):
         first = datetime(2027, 1, 19, 16, 30, tzinfo=HELSINKI)
         prices = quarter_prices(first, [100.0] * 4 + [200.0] * 60)  # 16 hours known, then none
-        quarters = spot_prices.bars(prices, self.NOW, timedelta(minutes=15))
+        quarters = spot_prices.bars(prices, self.NOW)
         self.assertEqual(len(quarters), 96)
         self.assertEqual(quarters[0][0], first.astimezone(UTC))
         self.assertAlmostEqual(quarters[0][1], 12.55)
         self.assertAlmostEqual(quarters[4][1], 25.1)
         self.assertIsNone(quarters[64][1])  # not published yet
-        hours = spot_prices.bars(prices, self.NOW, timedelta(hours=1))
-        self.assertEqual(len(hours), 24)
-        self.assertEqual(hours[0][0], datetime(2027, 1, 19, 16, 0, tzinfo=HELSINKI).astimezone(UTC))
-        self.assertIsNone(hours[0][1])  # 16.00-16.30 isn't in the prices, so the hour isn't whole
-        self.assertAlmostEqual(hours[1][1], (12.55 * 2 + 25.1 * 2) / 4)
 
     def test_bars_span_24_real_hours_on_a_daylight_saving_day(self):
         now = datetime(2027, 3, 28, 1, 50, tzinfo=HELSINKI)  # clocks go from 03.00 to 04.00 tonight
         prices = quarter_prices(datetime(2027, 3, 28, 1, 45, tzinfo=HELSINKI), [50.0] * 96)
-        quarters = spot_prices.bars(prices, now, timedelta(minutes=15))
+        quarters = spot_prices.bars(prices, now)
         self.assertEqual(len(quarters), 96)
         self.assertEqual(quarters[-1][0] - quarters[0][0], timedelta(hours=23, minutes=45))
         self.assertTrue(all(c is not None for _, c in quarters))
@@ -789,12 +784,10 @@ class WidgetSizeTest(unittest.TestCase):
         extremes = quarter_prices(self.NOW - timedelta(minutes=15), [-500.0, 4000.0] * 40)
         for size in ((min_w, min_h), (533, 150), (800, 150), (min_w, 450), (800, min_h)):
             for language in ("en", "fi"):
-                for bar in (timedelta(minutes=15), timedelta(hours=1)):
-                    for prices in (extremes, None):
-                        sc = replace(self.worst_case(language, False), spot_prices=prices)
-                        with self.subTest(size=size, language=language, bar=bar, prices=prices is not None), \
-                                mock.patch.object(spot_prices, "BAR", bar):
-                            self.assertIsNone(self.drawn_outside(widget, size, sc))
+                for prices in (extremes, None):
+                    sc = replace(self.worst_case(language, False), spot_prices=prices)
+                    with self.subTest(size=size, language=language, prices=prices is not None):
+                        self.assertIsNone(self.drawn_outside(widget, size, sc))
 
     def test_fill(self):
         self.assertEqual(fmi_weather_hourly.hours_fitting(533), 12)  # 4 of 6 columns: as before layouts were configurable
