@@ -41,13 +41,14 @@ A home network: the server has no login and speaks plain HTTP, by choice (its cl
 
 Accepted, not fixed: anyone on the home network can view the dashboard, send a false battery level or a refresh (by adding the client header) or keep the service's threads busy; something answering at the server's address could feed the device its own image; the Wi-Fi password can be read from the device's flash over USB (flash encryption burns eFuses for good). Fixing those needs a shared secret or TLS on both sides, left out to keep the firmware trivial. A guest or IoT network for the device is the answer if it matters.
 
-## Where it stands (2026-11-13)
+## Where it stands (2026-11-17)
 
-Running: the server on the Pi and the firmware on the device, both as of the first review round of 2026-11-13. Built and tested but not yet deployed or flashed: that day's second round (server: stop codes kept after an empty answer, undrawable data, late fetches; firmware: the awake limit's backoff).
+Running: the server on the Pi and the firmware on the device, both as of e428796 (each data source owning its fetching, the second review round of 2026-11-13 included). Every path the device's notes listed as untried has been seen on the device, and the server's are down to the ones in its list.
 
 Open:
 
-1. Deploy and flash the above.
-2. Battery: once a full discharge is logged in `cache/battery.csv` on the Pi, fit the percentage curve from it, or at least check the low end, where the warning appears.
-3. The paths in the two "Not yet tried" lists.
-4. Maybe: a fixed device IP to skip DHCP (~1 s per wake); hiding departures that leave before the next wake.
+1. Battery: once a full discharge is logged in `cache/battery.csv` on the Pi, fit the percentage curve from it, or at least check the low end, where the warning appears.
+2. A deploy refused by its check leaves the new code and config on the Pi, so the next restart of the service loads them and fails until a good deploy (seen on the Pi).
+3. The wait for network time leaves its `sleep` behind when it runs out, and systemd logs "Found left-over process" as the service starts. Harmless.
+4. The paths in the server's "Not yet tried" list.
+5. Maybe: a fixed device IP to skip DHCP (~1 s per wake); hiding departures that leave before the next wake.
