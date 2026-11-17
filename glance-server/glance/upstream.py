@@ -1,11 +1,11 @@
-"""Reading an answer from a data provider (FMI, Digitransit), within limits.
+"""Reading an answer from a data provider (FMI, Digitransit, Elering), within limits.
 
 urllib's timeout limits each read, not the whole answer: a server sending a
 byte every few seconds could keep a fetch going for ever, and an answer of any
 size would be read into memory (the Pi has little). So every read from the
 connection, the status line and headers included, waits no longer than what is
 left of a deadline for the whole answer, and the body is read in pieces up to
-a size limit. Redirects are refused: neither provider uses them, and urllib
+a size limit. Redirects are refused: no provider uses them, and urllib
 would send the request's headers (the Digitransit key) on to wherever one
 pointed, plain HTTP included.
 

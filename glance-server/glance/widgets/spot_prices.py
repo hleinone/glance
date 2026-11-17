@@ -22,10 +22,12 @@ TYPE = "spot_prices"
 WORDS = {
     "en": {
         "title": "Spot price", "unit": "c/kWh", "tomorrow": "Tomorrow's prices around 14", "tomorrow_short": "Around 14",
+        "tomorrow_late": "Tomorrow's prices late", "tomorrow_late_short": "Late",
         "unavailable": "Spot price unavailable",
     },
     "fi": {
         "title": "Pörssisähkö", "unit": "snt/kWh", "tomorrow": "Huomisen hinnat n. klo 14", "tomorrow_short": "N. klo 14",
+        "tomorrow_late": "Huomisen hinnat myöhässä", "tomorrow_late_short": "Myöhässä",
         "unavailable": "Pörssisähkön hintaa ei saatavilla",
     },
 }
@@ -37,6 +39,9 @@ VIEW = timedelta(hours=24)
 # differences don't look like swings.
 SCALE_FLOOR = 10.0
 LEFT_W = 150  # the price now, beside the bars
+# Tomorrow's prices are published around 14 Finnish time and fetched within the
+# hour; from this hour on, prices still missing are late.
+LATE_FROM_HOUR = 15
 GRID_LABEL_W = 26  # the lines' values, either side of the bars
 
 
@@ -148,7 +153,8 @@ def _chart(d: ImageDraw.ImageDraw, sc: Scene, prices: Prices, cheapest: tuple[da
     first_unpublished = unpublished_from(shown)
     unpublished_left = round(x0 + first_unpublished * slot) if first_unpublished is not None else x1
     if first_unpublished is not None:
-        _unpublished(d, sc.language, (unpublished_left, y0, round(x1) - 1, y1))
+        late = sc.now.hour >= LATE_FROM_HOUR
+        _unpublished(d, sc.language, late, (unpublished_left, y0, round(x1) - 1, y1))
 
     zero = y(0)
     in_cheapest = set()
@@ -170,17 +176,19 @@ def _chart(d: ImageDraw.ImageDraw, sc: Scene, prices: Prices, cheapest: tuple[da
         label_y = max(min(y(max(near)), zero) - 12, y0 - 4)
         label, f = i18n.decimal(sc.language, cheapest[1]), font("semibold", 13)
         half = f.getlength(label) / 2
-        # Over its hour, but whole: inside the chart and clear of the unpublished part.
-        cx = max(x0 + half, min(x0 + (first + last + 1) / 2 * slot, unpublished_left - 3 - half))
-        text_vcenter(d, cx, label_y, label, f, BLACK, "m")
+        # Over its hour, but whole: inside the chart and clear of the unpublished
+        # part, or not at all when the known part is too narrow for it.
+        if unpublished_left - 3 - x0 >= 2 * half:
+            cx = max(x0 + half, min(x0 + (first + last + 1) / 2 * slot, unpublished_left - 3 - half))
+            text_vcenter(d, cx, label_y, label, f, BLACK, "m")
 
 
-def _unpublished(d: ImageDraw.ImageDraw, language: str, box: Rect) -> None:
+def _unpublished(d: ImageDraw.ImageDraw, language: str, late: bool, box: Rect) -> None:
     """The hours whose prices aren't out yet: an outline saying when they come,
-    in fewer words when narrow, or none."""
+    or that they are late, in fewer words when narrow, or none."""
     left, top, right, bottom = box
     d.rectangle(box, fill=WHITE, outline=LIGHT, width=2)
-    for key in ("tomorrow", "tomorrow_short"):
+    for key in ("tomorrow_late", "tomorrow_late_short") if late else ("tomorrow", "tomorrow_short"):
         text = i18n.t(WORDS, language, key)
         f, fitted = fit_text(text, "medium", 14, 11, right - left - 12)
         if fitted == text:

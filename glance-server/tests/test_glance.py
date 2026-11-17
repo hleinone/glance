@@ -904,6 +904,24 @@ class SpotPricesTest(unittest.TestCase):
         (_, x, f, _), = [t for t in texts if t[0] == label]
         self.assertLessEqual(x + f.getlength(label) / 2, boxes[0][0])  # ends before the outline starts
 
+    def test_the_cheapest_hours_price_is_left_out_where_the_known_part_is_too_narrow(self):
+        late_evening = datetime(2027, 1, 19, 23, 0, tzinfo=HELSINKI)  # one hour known, tomorrow not out
+        prices = quarter_prices(late_evening, [-95.0] * 4)
+        sc = render.Scene(now=late_evening, language="fi", forecast=None, stops={}, spot_prices=prices)
+        texts, boxes = self.draws(sc, widgets.SpotPrices.MIN_SIZE)
+        label = i18n.decimal("fi", spot_prices.cents(-95.0))
+        self.assertEqual([t for t in texts if t[0] == label], [(label, 12 - 2, mock.ANY, "l")])  # only the price now
+
+    def test_tomorrows_prices_still_missing_in_the_afternoon_are_late(self):
+        afternoon = datetime(2027, 1, 19, 16, 0, tzinfo=HELSINKI)
+        prices = quarter_prices(afternoon, [100.0] * 32)  # to midnight only
+        for language, words in (("fi", "Huomisen hinnat myöhässä"), ("en", "Tomorrow's prices late")):
+            sc = render.Scene(now=afternoon, language=language, forecast=None, stops={}, spot_prices=prices)
+            texts, _ = self.draws(sc, (800, 150))
+            with self.subTest(language=language):
+                self.assertIn(words, [t[0] for t in texts])
+                self.assertNotIn(spot_prices.WORDS[language]["tomorrow"], [t[0] for t in texts])
+
     def test_a_narrow_unpublished_part_says_when_in_fewer_words(self):
         early = datetime(2027, 1, 19, 6, 0, tzinfo=HELSINKI)  # 6 hours of tomorrow unknown: about 70 px
         prices = quarter_prices(early, [100.0] * 72)

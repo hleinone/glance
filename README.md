@@ -18,10 +18,10 @@ day, when the spot price falls below zero around midday.*
 
 ## How it works
 
-A small server (a Raspberry Pi will do) fetches the weather and departures,
-draws the whole screen as an image and serves it on the home network. The
-device only wakes up, downloads that image, shows it and goes back to deep
-sleep, so its firmware stays simple and its battery lasts.
+A small server (a Raspberry Pi will do) fetches the weather, departures and
+spot prices, draws the whole screen as an image and serves it on the home
+network. The device only wakes up, downloads that image, shows it and goes
+back to deep sleep, so its firmware stays simple and its battery lasts.
 
 ```mermaid
 flowchart LR
