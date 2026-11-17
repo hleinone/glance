@@ -20,16 +20,41 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from .. import i18n, upstream
+from ..checks import within
 
 if TYPE_CHECKING:
     from ..config import Config
 
 log = logging.getLogger(__name__)
+
+KEY_VARIABLE = "GLANCE_DIGITRANSIT_KEY"
+
+
+@dataclass(frozen=True)
+class Settings:
+    """[digitransit] in the config files, and the key from the environment."""
+    key: str | None = None
+    poll_lead_seconds: int = 15
+    min_refresh_seconds: int = 10
+    stale_after_minutes: int = 5
+
+
+def parse_settings(raw: dict, environ: Mapping[str, str]) -> Settings:
+    """environ: where the key variable is looked for first; empty for a config
+    loaded without local overrides, as the tests load it."""
+    return Settings(
+        key=environ.get(KEY_VARIABLE) or raw.get("key") or None,
+        # Under a minute: the poll belongs to the minute it runs before.
+        poll_lead_seconds=within(raw.get("poll_lead_seconds", 15), 0, 59, "poll_lead_seconds"),
+        min_refresh_seconds=within(raw.get("min_refresh_seconds", 10), 0, 3600, "min_refresh_seconds"),
+        stale_after_minutes=within(raw.get("stale_after_minutes", 5), 1, 7 * 24 * 60, "[digitransit] stale_after_minutes"),
+    )
 
 ENDPOINT = "https://api.digitransit.fi/routing/v2/hsl/gtfs/v1"
 GEOCODING_ENDPOINT = "https://api.digitransit.fi/geocoding/v1/search"
@@ -389,13 +414,14 @@ class Transit:
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
+        self.settings = cfg.source_settings.transit
         self.configured = [name for name, s in cfg.stops.items() if s.ids]
-        self.live = bool(cfg.digitransit_key and self.configured)
-        if not cfg.digitransit_key:
+        self.live = bool(self.settings.key and self.configured)
+        if not self.settings.key:
             log.info("no Digitransit key configured: showing placeholder departures")
         elif not self.configured:
             log.info("no stop codes configured: showing placeholder departures")
-        self.stale_after = timedelta(minutes=cfg.departures_stale_after_minutes)
+        self.stale_after = timedelta(minutes=self.settings.stale_after_minutes)
         self.codes_path = cfg.cache_dir / "stop_codes.json"
         self.code_ids: dict[str, str] = self._load_codes()
         self.unknown_codes: set[str] = set()  # looked up and not found: not asked again until a restart
@@ -430,7 +456,7 @@ class Transit:
             return
         for code in sorted(codes):
             try:
-                stop_id = resolve_code(code, self.cfg.digitransit_key)
+                stop_id = resolve_code(code, self.settings.key)
             except HSLError as e:
                 log.warning("could not look up stop code %s (%s); will retry", code, e)
                 continue
@@ -514,7 +540,7 @@ class Transit:
         try:
             self._resolve_codes()
             queries = [self._query(name) for name in self.configured]
-            by_stop, names, modes = fetch(queries, self.cfg.digitransit_key, self.cfg.language)
+            by_stop, names, modes = fetch(queries, self.settings.key, self.cfg.language)
         except HSLError as e:
             log.warning("departures fetch failed (%s); keeping last good data from %s", e, self.fetched_at)
             return

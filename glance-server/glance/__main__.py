@@ -65,10 +65,11 @@ def cmd_render(cfg: Config, args: argparse.Namespace) -> None:
 
 
 def cmd_stops(cfg: Config, args: argparse.Namespace) -> None:
-    if not cfg.digitransit_key:
+    key = cfg.source_settings.transit.key
+    if not key:
         raise SystemExit("No Digitransit key: add [digitransit] key = \"...\" to config.local.toml")
     try:
-        print(hsl.format_search(hsl.search(args.name, cfg.digitransit_key)))
+        print(hsl.format_search(hsl.search(args.name, key)))
     except hsl.HSLError as e:
         raise SystemExit(f"stop search failed: {e}")
 
@@ -287,7 +288,7 @@ def make_handler(
                     # (Interval sources such as the weather are left to the
                     # refresher, which checks them every minute; fetching them
                     # here could keep the device waiting.)
-                    transit.refresh(cfg.departures_min_refresh_seconds, wait_seconds=UPSTREAM_WAIT)
+                    transit.refresh(transit.settings.min_refresh_seconds, wait_seconds=UPSTREAM_WAIT)
                 plan = schedule.plan(datetime.now(cfg.tz), cfg.wake_schedule, cfg.wake_offset_seconds)
                 planned_at = time.monotonic()
                 deck = cfg.deck_at(plan.display_time)
@@ -379,14 +380,14 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
                 except Exception:
                     log.exception("%s refresh failed", source.WHAT)
             now = datetime.now(cfg.tz)
-            next_poll = schedule.next_poll(now, cfg.departures_poll_lead_seconds)
+            next_poll = schedule.next_poll(now, transit.settings.poll_lead_seconds)
             if stop.wait(max(0.0, schedule.seconds_between(now, next_poll))):
                 break
             try:
                 minute = schedule.next_boundary(datetime.now(cfg.tz), 1)
                 if not cfg.wake_schedule.is_wake(minute):
                     continue  # the device sleeps through this minute: no polling, no drawing
-                transit.refresh(cfg.departures_min_refresh_seconds, wait_seconds=POLL_WAIT)
+                transit.refresh(transit.settings.min_refresh_seconds, wait_seconds=POLL_WAIT)
                 started = time.monotonic()
                 interval = cfg.wake_schedule.interval_at(minute)
                 # The screen that minute will show: the selected one, or the

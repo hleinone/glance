@@ -31,7 +31,10 @@ def isolated_config(test: unittest.TestCase, stops: list[widgets.HslStops] | Non
         # The example's wake times, without its decks.
         changes["wake_schedule"] = schedule.WakeSchedule(
             tuple(replace(r, deck=None) for r in cfg.wake_schedule.rules), cfg.wake_schedule.default_every, "all")
-    return replace(cfg, **{"digitransit_key": None, "cache_dir": cache, **changes})
+    # The key is a setting of the departures source's own; None unless a test gives one.
+    transit = replace(cfg.source_settings.transit, key=changes.pop("digitransit_key", None))
+    changes.setdefault("source_settings", replace(cfg.source_settings, transit=transit))
+    return replace(cfg, **{"cache_dir": cache, **changes})
 
 
 # The least a config file needs: a location and a screen.
@@ -401,9 +404,9 @@ codes = "H0001"
                 os.environ.pop("GLANCE_DIGITRANSIT_KEY", None)  # it would win over the file
                 cfg = config.load(path)
                 os.environ["GLANCE_DIGITRANSIT_KEY"] = "from-env"
-                self.assertEqual(config.load(path).digitransit_key, "from-env")
-                self.assertEqual(config.load(path, local_overrides=False).digitransit_key, None)
-        self.assertEqual(cfg.digitransit_key, "secret")
+                self.assertEqual(config.load(path).source_settings.transit.key, "from-env")
+                self.assertEqual(config.load(path, local_overrides=False).source_settings.transit.key, None)
+        self.assertEqual(cfg.source_settings.transit.key, "secret")
         self.assertEqual(list(cfg.stops), ["one", "two", "three", "four"])  # layout order; unused left out
         self.assertEqual(cfg.stops["one"], widgets.HslStops("One", ("HSL:1",), frozenset({"7", "9"})))
         self.assertEqual(cfg.stops["two"].ids, ("HSL:2", "HSL:3"))

@@ -11,7 +11,9 @@ from zoneinfo import ZoneInfo
 
 from . import layout as layout_
 from . import widgets as widgets_
+from .checks import within
 from .decks import Deck
+from .sources import SourceSettings
 from .widgets import HslStops, Widget
 from .schedule import DAY_NAMES, WakeRule, WakeSchedule
 
@@ -26,8 +28,7 @@ class Config:
     lon: float
     host: str
     port: int
-    weather_refresh_minutes: int
-    weather_stale_after_minutes: int
+    source_settings: SourceSettings
     cache_dir: Path
     widgets: dict[str, Widget]
     screens: dict[str, layout_.Layout]
@@ -37,10 +38,6 @@ class Config:
     hostnames: tuple[str, ...] = ()
     # Networks besides private ones that may reach the server; see client_allowed().
     allowed_networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...] = ()
-    digitransit_key: str | None = None
-    departures_poll_lead_seconds: int = 15
-    departures_min_refresh_seconds: int = 10
-    departures_stale_after_minutes: int = 5
     wake_schedule: WakeSchedule = WakeSchedule()
     wake_offset_seconds: float = 2
     battery_full_mv: int = 4200  # what this device reads for a full battery
@@ -106,9 +103,6 @@ def load(path: Path | None = None, local_overrides: bool = True) -> Config:
             raise ValueError(f"{old} is no longer used: see config.toml ({new})")
     location = raw["location"]
     server = raw.get("server", {})
-    weather = raw.get("fmi", {})
-    digitransit = raw.get("digitransit", {})
-    key = (local_overrides and os.environ.get("GLANCE_DIGITRANSIT_KEY")) or digitransit.get("key") or None
     hostnames = server.get("hostnames", [])
     if isinstance(hostnames, str):
         hostnames = [hostnames]
@@ -126,24 +120,18 @@ def load(path: Path | None = None, local_overrides: bool = True) -> Config:
     return Config(
         language=language,
         tz=ZoneInfo(raw.get("timezone", "Europe/Helsinki")),
-        lat=_within(location["lat"], -90, 90, "[location] lat", float),
-        lon=_within(location["lon"], -180, 180, "[location] lon", float),
+        lat=within(location["lat"], -90, 90, "[location] lat", float),
+        lon=within(location["lon"], -180, 180, "[location] lon", float),
         host=server.get("host", "0.0.0.0"),
-        port=_within(server.get("port", 8080), 1, 65535, "[server] port"),
-        weather_refresh_minutes=_within(weather.get("refresh_minutes", 15), 1, 24 * 60, "[fmi] refresh_minutes"),
-        weather_stale_after_minutes=_within(weather.get("stale_after_minutes", 45), 1, 7 * 24 * 60, "[fmi] stale_after_minutes"),
+        port=within(server.get("port", 8080), 1, 65535, "[server] port"),
+        source_settings=SourceSettings.parse(raw, os.environ if local_overrides else {}),
         cache_dir=cache_dir,
         **_setup(raw),
         hostnames=tuple(str(h).rstrip(".").lower() for h in hostnames),
         allowed_networks=networks,
-        digitransit_key=key,
-        # Under a minute: the poll belongs to the minute it runs before.
-        departures_poll_lead_seconds=_within(digitransit.get("poll_lead_seconds", 15), 0, 59, "poll_lead_seconds"),
-        departures_min_refresh_seconds=_within(digitransit.get("min_refresh_seconds", 10), 0, 3600, "min_refresh_seconds"),
-        departures_stale_after_minutes=_within(digitransit.get("stale_after_minutes", 5), 1, 7 * 24 * 60, "[digitransit] stale_after_minutes"),
-        wake_offset_seconds=_within(device.get("wake_offset_seconds", 2), 0, 59, "wake_offset_seconds", float),
+        wake_offset_seconds=within(device.get("wake_offset_seconds", 2), 0, 59, "wake_offset_seconds", float),
         # Within what the device can report (battery.PLAUSIBLE_MV), and a LiPo can be full at.
-        battery_full_mv=_within(raw.get("battery", {}).get("full_mv", 4200), 3500, 5000, "[battery] full_mv"),
+        battery_full_mv=within(raw.get("battery", {}).get("full_mv", 4200), 3500, 5000, "[battery] full_mv"),
     )
 
 
@@ -262,17 +250,6 @@ def _minutes(text: str) -> int:
     if not (0 <= minutes <= 59 and 0 <= value <= 24 * 60):
         raise ValueError(f"bad time {text!r}: use HH:MM")
     return value % (24 * 60)
-
-
-def _within(value, low: float, high: float, name: str, number=int):
-    try:
-        # bool is a number to Python: `port = true` would otherwise be port 1.
-        value = number("" if isinstance(value, bool) else value)
-    except (TypeError, ValueError):
-        raise ValueError(f"{name} must be a number, not {value!r}") from None
-    if not low <= value <= high:
-        raise ValueError(f"{name} must be {low}..{high}, not {value}")
-    return value
 
 
 def _schedule(raw: dict, decks: dict[str, Deck]) -> WakeSchedule:
