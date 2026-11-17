@@ -43,12 +43,12 @@ Accepted, not fixed: anyone on the home network can view the dashboard, send a f
 
 ## Where it stands (2026-11-17)
 
-Running: the server on the Pi and the firmware on the device, both as of e428796 (each data source owning its fetching, the second review round of 2026-11-13 included). Every path the device's notes listed as untried has been seen on the device, and the server's are down to the ones in its list.
+Running: the server on the Pi and the firmware on the device, both as of e428796 (each data source owning its fetching, the second review round of 2026-11-13 included). Every path the device's notes listed as untried before then has been seen on the device; what neither part has seen yet is in their lists.
 
 Open:
 
 1. Battery: once a full discharge is logged in `cache/battery.csv` on the Pi, fit the percentage curve from it, or at least check the low end, where the warning appears.
 2. A failed deploy can leave the service down until a good one. One refused by its check has already put the new code and config on the Pi, so the service's next restart loads them; one whose service doesn't stay up has already restarted it with them. Both seen on the Pi.
 3. The wait for network time leaves its `sleep` behind when it runs out, and systemd logs "Found left-over process" as the service starts. Harmless.
-4. The paths in the server's "Not yet tried" list.
+4. The paths in the two "Not yet tried" lists.
 5. Maybe: a fixed device IP to skip DHCP (~1 s per wake); hiding departures that leave before the next wake.

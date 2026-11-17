@@ -57,7 +57,7 @@ Partial refresh works only in 1-bit mode (`deinitGrayMode()`). `push_mark()` run
 ## When things go wrong
 
 - Failed updates (Wi-Fi or server) are counted in RTC memory. Retries back off 30 s, then 1, 2, 5, 10 and 15 minutes, and return to normal on the first success. A button press retries at once. A failed attempt costs about 2 s awake, plus 1 s to power the panel down.
-- Timeouts: Wi-Fi 10 s (after 5 s at the remembered access point), HTTP connect 4 s, HTTP 10 s. The HTTP client's 10 s limits each wait for more of the headers, not the whole of them: a server sending its headers a byte every 4 s held the device until the awake limit ended it. Once the headers are in, the image must arrive within what is left of 10 s from sending the request.
+- Timeouts: Wi-Fi 10 s (after 5 s at the remembered access point), HTTP connect 4 s, HTTP 10 s. The HTTP client's 10 s limits each wait for more of the headers, not the whole of them: a server sending its headers a byte every 4 s held the device until the awake limit ended it. Once the headers are in, the image must arrive within what is left of 10 s from the start of the request, connecting included.
 - `X-Glance-Sleep` is capped at 25 hours (`MAX_SLEEP_S`). After two sleeps of 10 s or less in a row the device sleeps 60 s instead: a server fault answering "1 s" each time would refresh the panel until the battery was flat.
 - Awake limit: a one-shot timer started first thing in `setup()` (90 s; the worst normal update is under a minute) forces deep sleep with the backoff, counting its own hits in a row. Without it, anything that never returns keeps the device awake, and the display library waits for the panel's BUSY line with no timeout. Its callback runs in the esp_timer task beside the stuck `setup()`, so it only sets the wake-ups and sleeps.
 - Empty battery: a reading under 3300 mV (and over 0) skips the update before the panel and radio are powered, and looks again in 15 minutes. The threshold is a guess from the server's curve; whether the board protects the cell itself is unknown.
@@ -66,4 +66,6 @@ Partial refresh works only in 1-bit mode (`deinitGrayMode()`). `push_mark()` run
 
 ## Not yet tried on the device
 
-Nothing at the moment.
+- A press whose request the server answered but whose image then failed: the retry should not carry a white button (the server already stepped), and should carry the green one.
+- A white press answered `204` while the refreshing mark is up (the deck shrank to one screen since the last update): the device should fetch the image again to replace the mark.
+- A frame buffer that wasn't allocated (it needs a test build).
