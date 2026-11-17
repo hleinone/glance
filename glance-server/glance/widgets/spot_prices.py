@@ -21,11 +21,11 @@ from ..sources.elering import STEP, Prices, PricesRequest
 TYPE = "spot_prices"
 WORDS = {
     "en": {
-        "title": "Spot price", "unit": "c/kWh", "tomorrow": "Tomorrow's prices around 14",
+        "title": "Spot price", "unit": "c/kWh", "tomorrow": "Tomorrow's prices around 14", "tomorrow_short": "Around 14",
         "unavailable": "Spot price unavailable",
     },
     "fi": {
-        "title": "Pörssisähkö", "unit": "snt/kWh", "tomorrow": "Huomisen hinnat n. klo 14",
+        "title": "Pörssisähkö", "unit": "snt/kWh", "tomorrow": "Huomisen hinnat n. klo 14", "tomorrow_short": "N. klo 14",
         "unavailable": "Pörssisähkön hintaa ei saatavilla",
     },
 }
@@ -62,6 +62,13 @@ def bars(prices: Prices, now: datetime) -> list[tuple[datetime, float | None]]:
     first = _floor(now, STEP)
     starts = (first + i * STEP for i in range(round(VIEW / STEP)))
     return [(start, cents(p.eur_per_mwh) if (p := prices.at(start)) else None) for start in starts]
+
+
+def unpublished_from(shown: list[tuple[datetime, float | None]]) -> int | None:
+    """Where the bars' unknown end starts (tomorrow's prices, not published
+    yet), if they have one. A gap before a known price is only a gap."""
+    last_known = max((i for i, (_, c) in enumerate(shown) if c is not None), default=-1)
+    return last_known + 1 if last_known + 1 < len(shown) else None
 
 
 def cheapest_hour(prices: Prices, now: datetime) -> tuple[datetime, float] | None:
@@ -129,14 +136,19 @@ def _chart(d: ImageDraw.ImageDraw, sc: Scene, prices: Prices, cheapest: tuple[da
         return y1 - (c - low) / (high - low) * (y1 - y0)
 
     small = font("medium", 12)
-    places = 0 if step >= 1 else 1
     for k in range(round(low / step), round(high / step) + 1):
-        value = k * step
+        value = k * step  # whole numbers: the scale spans at least SCALE_FLOOR, so the step is at least 5
         line_y = round(y(value))
         d.line((x0, line_y, x1 - 1, line_y), fill=DARK if value == 0 else LIGHT)
-        label = i18n.decimal(sc.language, value, places)
+        label = i18n.decimal(sc.language, value, 0)
         text_vcenter(d, x0 - 5, line_y, label, small, DARK, "r")
         text_vcenter(d, x1 + 5, line_y, label, small, DARK)
+
+    # Before the bars and the cheapest hour's price, so nothing is painted over them.
+    first_unpublished = unpublished_from(shown)
+    unpublished_left = round(x0 + first_unpublished * slot) if first_unpublished is not None else x1
+    if first_unpublished is not None:
+        _unpublished(d, sc.language, (unpublished_left, y0, round(x1) - 1, y1))
 
     zero = y(0)
     in_cheapest = set()
@@ -156,13 +168,21 @@ def _chart(d: ImageDraw.ImageDraw, sc: Scene, prices: Prices, cheapest: tuple[da
         # Clear of the bars it sits over: the hour's and a few either side.
         near = [c for _, c in shown[max(0, first - 3):last + 4] if c is not None]
         label_y = max(min(y(max(near)), zero) - 12, y0 - 4)
-        text_vcenter(d, x0 + (first + last + 1) / 2 * slot, label_y, i18n.decimal(sc.language, cheapest[1]),
-                     font("semibold", 13), BLACK, "m")
+        label, f = i18n.decimal(sc.language, cheapest[1]), font("semibold", 13)
+        half = f.getlength(label) / 2
+        # Over its hour, but whole: inside the chart and clear of the unpublished part.
+        cx = max(x0 + half, min(x0 + (first + last + 1) / 2 * slot, unpublished_left - 3 - half))
+        text_vcenter(d, cx, label_y, label, f, BLACK, "m")
 
-    unknown = [i for i, (_, c) in enumerate(shown) if c is None]
-    if unknown:
-        left, right = round(x0 + unknown[0] * slot), round(x0 + (unknown[-1] + 1) * slot) - 1
-        d.rectangle((left, y0, right, y1), fill=WHITE, outline=LIGHT, width=2)
-        f, text = fit_text(i18n.t(WORDS, sc.language, "tomorrow"), "medium", 14, 11, right - left - 12)
-        if right - left > 60:
-            text_vcenter(d, (left + right) / 2, (y0 + y1) / 2, text, f, DARK, "m")
+
+def _unpublished(d: ImageDraw.ImageDraw, language: str, box: Rect) -> None:
+    """The hours whose prices aren't out yet: an outline saying when they come,
+    in fewer words when narrow, or none."""
+    left, top, right, bottom = box
+    d.rectangle(box, fill=WHITE, outline=LIGHT, width=2)
+    for key in ("tomorrow", "tomorrow_short"):
+        text = i18n.t(WORDS, language, key)
+        f, fitted = fit_text(text, "medium", 14, 11, right - left - 12)
+        if fitted == text:
+            text_vcenter(d, (left + right) / 2, (top + bottom) / 2, text, f, DARK, "m")
+            return

@@ -38,7 +38,7 @@ DEADLINE = 20
 # Today's prices are known since yesterday afternoon and tomorrow's arrive
 # around 14 Finnish time, so an hourly fetch shows them within the hour.
 REFRESH = timedelta(hours=1)
-# The market's step since October 2025; a price's end is the next one's start.
+# The market's step since October 2025: each price covers this long from its start.
 STEP = timedelta(minutes=15)
 # Prices outside this band (€/MWh) are left out: the market's limits are
 # −500 and 4000, so anything beyond is not a price.
@@ -86,7 +86,7 @@ def parse(body: bytes) -> tuple[Price, ...]:
     JSON raises EleringError; single prices that can't be right are left out."""
     try:
         answer = json.loads(body)
-    except ValueError as e:
+    except (ValueError, RecursionError) as e:  # RecursionError: brackets nested too deep
         raise EleringError(f"unreadable answer: {e}") from e
     if not isinstance(answer, dict) or answer.get("success") is not True:
         raise EleringError("the answer says it failed")
@@ -104,17 +104,36 @@ def parse(body: bytes) -> tuple[Price, ...]:
 def _price(row) -> Price | None:
     if not isinstance(row, dict):
         return None
-    stamp, value = row.get("timestamp"), row.get("price")
-    # bool is a number to Python, and neither true nor false is a time or a price.
-    if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (stamp, value)):
-        return None
-    if not (math.isfinite(stamp) and math.isfinite(value) and BAND[0] <= value <= BAND[1]):
+    stamp = row.get("timestamp")
+    if not _number(stamp) or not _finite(stamp):
         return None
     try:
         start = datetime.fromtimestamp(stamp, UTC)
     except (OverflowError, OSError, ValueError):
         return None
-    return Price(start, float(value)) if start.year in YEARS else None
+    return _checked(start, row.get("price"))
+
+
+def _finite(v: int | float) -> bool:
+    """False for NaN, infinity, and an integer too big to be a float (JSON allows any length)."""
+    try:
+        return math.isfinite(v)
+    except OverflowError:
+        return False
+
+
+def _number(v) -> bool:
+    # bool is a number to Python, and neither true nor false is a time or a price.
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _checked(start: datetime, value) -> Price | None:
+    """A price that can be right, from the answer or the cache, else None."""
+    if not _number(value) or not _finite(value) or not BAND[0] <= value <= BAND[1]:
+        return None
+    if start.tzinfo is None or start.year not in YEARS:
+        return None
+    return Price(start.astimezone(UTC), float(value))
 
 
 def fetch(tz: ZoneInfo, now: datetime) -> Prices:
@@ -128,7 +147,8 @@ def fetch(tz: ZoneInfo, now: datetime) -> Prices:
         raise EleringError(f"HTTP {e.code}") from e
     except (OSError, http.client.HTTPException) as e:  # HTTPException: e.g. a body cut short
         raise EleringError(str(e) or type(e).__name__) from e
-    prices = parse(body)
+    # Only what was asked for: the widget looks each price up, so a longer answer costs every drawing.
+    prices = tuple(p for p in parse(body) if midnight <= p.start <= end)
     if not prices:
         raise EleringError(f"no prices for {AREA!r} in the answer")
     return Prices(now, prices)
@@ -148,12 +168,19 @@ def save_cache(prices: Prices, path: Path) -> None:
 
 
 def load_cache(path: Path) -> Prices | None:
+    """Checked as the answer is: the file could be from an older version, or damaged."""
     try:
         data = json.loads(path.read_text())
-        prices = tuple(Price(datetime.fromisoformat(start), float(value)) for start, value in data["prices"])
-        if not all(math.isfinite(p.eur_per_mwh) and p.start.tzinfo for p in prices):
-            raise ValueError("a price that can't be drawn")
-        return Prices(datetime.fromisoformat(data["fetched_at"]), prices)
+        fetched_at = datetime.fromisoformat(data["fetched_at"])
+        if fetched_at.tzinfo is None:
+            raise ValueError("fetched_at has no time zone")
+        by_start = {}
+        for start, value in data["prices"]:
+            price = _checked(datetime.fromisoformat(start), value)
+            if price is None:
+                raise ValueError(f"a price that can't be right: {start} {value!r}")
+            by_start[price.start] = price
+        return Prices(fetched_at, tuple(by_start[t] for t in sorted(by_start)))
     except FileNotFoundError:
         return None
     except (ValueError, KeyError, TypeError) as e:
@@ -170,8 +197,8 @@ WORDS = {
 
 
 class Electricity(Periodic[Prices]):
-    """Holds the latest good spot prices; refreshes about hourly, and at once
-    when they don't cover the time now."""
+    """Holds the latest good spot prices; refreshes hourly, and sooner (at start,
+    or after Periodic.RETRY_AFTER) when they don't cover the time now."""
 
     WHAT = "spot prices"
     ERRORS = (EleringError,)

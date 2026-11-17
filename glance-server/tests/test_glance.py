@@ -477,16 +477,17 @@ class EleringTest(unittest.TestCase):
             b'{"timestamp": %d, "price": true}' % self.T1,
             b'{"timestamp": 0, "price": 40.0}',                 # 1970
             b'{"timestamp": 99999999999999999999, "price": 40.0}',
+            b'{"timestamp": %d, "price": 1%s}' % (self.T1, b"0" * 400),  # too big for a float
             b'{"price": 40.0}', b'"a string"', b'null',
         ]) + b"]}}"
         self.assertEqual([p.eur_per_mwh for p in elering.parse(body)], [40.0])
 
     def test_any_bad_answer_is_an_elering_error(self):
-        for body in (b"<html>busy</html>", b"[]", self.answer({"success": False, "data": {}}),
+        for body in (b"<html>busy</html>", b"[]", b"[" * 200_000, self.answer({"success": False, "data": {}}),
                      self.answer({"success": True, "data": {"ee": []}}),
                      self.answer({"success": True, "data": {"fi": "none"}}),
                      self.answer({"success": True, "data": []})):
-            with self.subTest(body=body), self.assertRaises(elering.EleringError):
+            with self.subTest(body=body[:40]), self.assertRaises(elering.EleringError):
                 elering.parse(body)
         empty = self.answer({"success": True, "data": {"fi": []}})
         with mock.patch("glance.upstream._open", return_value=io.BytesIO(empty)), \
@@ -497,9 +498,13 @@ class EleringTest(unittest.TestCase):
             elering.fetch(HELSINKI, datetime.now(UTC))
 
     def test_the_request_carries_only_dates_from_local_midnight(self):
-        body = self.answer({"success": True, "data": {"fi": [{"timestamp": self.T0, "price": 1.0}]}})
+        body = self.answer({"success": True, "data": {"fi": [
+            {"timestamp": self.T0, "price": 1.0},
+            {"timestamp": self.T0 + 3 * 24 * 3600, "price": 2.0},  # not asked for: left out
+        ]}})
         with mock.patch("glance.upstream._open", return_value=io.BytesIO(body)) as opened:
-            elering.fetch(HELSINKI, datetime(2027, 1, 19, 16, 42, tzinfo=HELSINKI))
+            prices = elering.fetch(HELSINKI, datetime(2027, 1, 19, 16, 42, tzinfo=HELSINKI))
+        self.assertEqual([p.eur_per_mwh for p in prices.prices], [1.0])
         url = urllib.parse.urlsplit(opened.call_args.args[0].full_url)
         self.assertEqual(url.netloc, "dashboard.elering.ee")
         self.assertEqual(urllib.parse.parse_qs(url.query), {
@@ -539,6 +544,41 @@ class EleringTest(unittest.TestCase):
         with mock.patch.object(elering, "fetch", return_value=fresh) as fetch:
             source.refresh()
         self.assertEqual(fetch.call_count, 1)
+
+    def test_prices_that_dont_cover_now_are_fetched_again_soon_after_a_fetch(self):
+        # A fetch can succeed before tomorrow's prices are out; past midnight they don't cover now.
+        from glance.sources.elering import Electricity
+        source = Electricity(isolated_config(self, stops=[], spot=True))
+        now = datetime.now(UTC)
+        ended = elering.Prices(now, (elering.Price(now - timedelta(hours=2), 50.0),))
+        ticks = [1000.0, 1000.0 + 60, 1000.0 + 121]  # time.monotonic() at each refresh
+        with mock.patch.object(elering, "fetch", return_value=ended) as fetch, \
+                mock.patch("glance.sources.periodic.time.monotonic", side_effect=ticks):
+            source.refresh()  # succeeds, but nothing covers now
+            source.refresh()  # a minute later: not yet
+            source.refresh()  # after Periodic.RETRY_AFTER, not the hour
+        self.assertEqual(fetch.call_count, 2)
+
+    def test_the_cache_is_checked_as_the_answer_is(self):
+        from glance.sources.elering import Electricity
+        cfg = isolated_config(self, stops=[], spot=True)
+        path = cfg.cache_dir / "spot_prices.json"
+        good = '["2027-01-19T14:30:00+00:00", 50.0]'
+        for fetched_at, rows in (
+            ("2027-01-19T14:00:00", good),                                  # no time zone
+            ("2027-01-19T14:00:00+00:00", '["2027-01-19T14:30:00+00:00", 1e308]'),  # beyond any market limit
+            ("2027-01-19T14:00:00+00:00", '["2027-01-19T14:30:00", 50.0]'),          # a start with no zone
+            ("2027-01-19T14:00:00+00:00", '["1970-01-01T00:00:00+00:00", 50.0]'),
+            ("2027-01-19T14:00:00+00:00", '[50.0]'),
+        ):
+            with self.subTest(fetched_at=fetched_at, rows=rows):
+                path.write_text(f'{{"fetched_at": "{fetched_at}", "prices": [{good}, {rows}]}}')
+                with self.assertLogs("glance", "WARNING"):
+                    self.assertIsNone(Electricity(cfg).prices)
+        path.write_text('{"fetched_at": "2027-01-19T14:00:00+00:00", "prices": ['
+                        '["2027-01-19T14:45:00+00:00", 60.0], ["2027-01-19T16:30:00+02:00", 50.0]]}')
+        self.assertEqual([p.start.isoformat() for p in Electricity(cfg).prices.prices],
+                         ["2027-01-19T14:30:00+00:00", "2027-01-19T14:45:00+00:00"])  # in order, in UTC
 
     def test_status_bar_says_when_there_is_no_price_for_now(self):
         from glance.sources import Sources
@@ -835,6 +875,44 @@ class SpotPricesTest(unittest.TestCase):
         self.assertTrue(all(c is not None for _, c in quarters))
         self.assertEqual(quarters[-1][0].astimezone(HELSINKI).hour, 2)  # 01.45 + 24 h, an hour later on the wall
 
+    def test_only_the_unknown_end_is_marked_as_not_published(self):
+        first = datetime(2027, 1, 19, 16, 30, tzinfo=HELSINKI)
+        prices = quarter_prices(first, [50.0] * 64)
+        holed = replace(prices, prices=prices.prices[:10] + prices.prices[11:])  # one quarter left out
+        self.assertEqual(spot_prices.unpublished_from(spot_prices.bars(holed, self.NOW)), 64)
+        whole_day = quarter_prices(first, [50.0] * 96)
+        self.assertIsNone(spot_prices.unpublished_from(spot_prices.bars(whole_day, self.NOW)))
+
+    def draws(self, sc: render.Scene, size: tuple[int, int]) -> tuple[list, list]:
+        """The spot price widget's texts (text, x, font, align) and its outlined boxes."""
+        from PIL import Image, ImageDraw
+        img = Image.new("L", size, 255)
+        d = mock.Mock(wraps=ImageDraw.Draw(img))
+        with mock.patch.object(spot_prices, "text_vcenter", wraps=spot_prices.text_vcenter) as text:
+            spot_prices.draw(img, d, sc, (0, 0, *size), "w", widgets.SpotPrices())
+        texts = [(c.args[3], c.args[1], c.args[4], c.args[6] if len(c.args) > 6 else "l") for c in text.call_args_list]
+        boxes = [c.args[0] for c in d.rectangle.call_args_list if c.kwargs.get("outline") is not None]
+        return texts, boxes
+
+    def test_the_cheapest_hours_price_stays_whole_beside_the_unpublished_part(self):
+        morning = datetime(2027, 1, 19, 8, 12, tzinfo=HELSINKI)
+        values = [100.0] * 60 + [-95.0] * 4  # 08-24: the last hour, 23-24, is the cheapest; tomorrow isn't out
+        prices = quarter_prices(datetime(2027, 1, 19, 8, 0, tzinfo=HELSINKI), values)
+        sc = render.Scene(now=morning, language="fi", forecast=None, stops={}, spot_prices=prices)
+        texts, boxes = self.draws(sc, widgets.SpotPrices.MIN_SIZE)
+        label = i18n.decimal("fi", spot_prices.cents(-95.0))
+        (_, x, f, _), = [t for t in texts if t[0] == label]
+        self.assertLessEqual(x + f.getlength(label) / 2, boxes[0][0])  # ends before the outline starts
+
+    def test_a_narrow_unpublished_part_says_when_in_fewer_words(self):
+        early = datetime(2027, 1, 19, 6, 0, tzinfo=HELSINKI)  # 6 hours of tomorrow unknown: about 70 px
+        prices = quarter_prices(early, [100.0] * 72)
+        for language in ("fi", "en"):
+            sc = render.Scene(now=early, language=language, forecast=None, stops={}, spot_prices=prices)
+            texts, _ = self.draws(sc, widgets.SpotPrices.MIN_SIZE)
+            with self.subTest(language=language):
+                self.assertIn(spot_prices.WORDS[language]["tomorrow_short"], [t[0] for t in texts])
+
     def test_the_cheapest_hour_is_a_whole_clock_hour_still_to_come(self):
         first = datetime(2027, 1, 19, 16, 0, tzinfo=HELSINKI)
         values = [80.0] * 96
@@ -1022,15 +1100,38 @@ class RenderTest(unittest.TestCase):
         self.assert_panel_image(render.render(self.cfg, sc))
 
     def test_status_text(self):
-        self.assertEqual(render._status_warning(self.scene), None)
+        self.assertEqual(render._status_warnings(self.scene), [])
         live = replace(self.scene, departures_live=True, departures_fetched_at=self.now - timedelta(minutes=12))
         self.assertTrue(live.departures_stale)  # so the stops draw realtime times grey
         fresh = replace(live, departures_fetched_at=self.now - timedelta(seconds=40))
         self.assertFalse(fresh.departures_stale)
         # The status bar shows what the sources say, then its own warning.
         warned = replace(self.scene, warnings=("Weather 2 h old", "Departures 12 min old"), battery_percent=10)
-        self.assertEqual(render._status_warning(warned), "Weather 2 h old · Departures 12 min old · Charge battery")
+        self.assertEqual(render._status_warnings(warned), ["Weather 2 h old", "Departures 12 min old", "Charge battery"])
         self.assert_panel_image(render.render(self.cfg, replace(live, warnings=("Departures 12 min old",))))
+
+    def test_many_warnings_leave_the_date_and_clock_alone(self):
+        from PIL import Image, ImageDraw
+        every = {
+            "fi": ("Säätietoja ei saatavilla", "Lähtötietoja ei saatavilla", "Pörssisähkön hintaa ei saatavilla"),
+            "en": ("Weather unavailable", "Departures unavailable", "Spot price unavailable"),
+        }
+        for language, warnings in every.items():
+            quiet = replace(self.scene, language=language, battery_percent=5)  # "Charge battery" too
+            clock_end = 10 + draw.font("semibold", 17).getlength(
+                f"{i18n.date(language, quiet.now)}   {i18n.clock(language, quiet.now)}")
+            bars = []
+            for sc in (quiet, replace(quiet, warnings=warnings)):
+                img = Image.new("L", (render.W, render.BAR), 255)
+                render.draw_status_bar(img, ImageDraw.Draw(img), sc)
+                bars.append(img.crop((0, 0, round(clock_end) + render.PAGE_MARGIN, render.BAR)).tobytes())
+            with self.subTest(language=language):
+                self.assertEqual(bars[0], bars[1])
+        f = draw.font("semibold", 15)
+        self.assertEqual(render._fitting(["Weather unavailable", "Departures unavailable", "Charge battery"], f,
+                                         f.getlength("Weather unavailable +2")), "Weather unavailable +2")
+        self.assertEqual(render._fitting(["Weather unavailable", "Charge battery"], f, 1000),
+                         "Weather unavailable · Charge battery")  # what fits is shown as before
 
     def test_page_dots(self):
         from PIL import ImageChops
@@ -1392,8 +1493,8 @@ class BatteryTest(unittest.TestCase):
         now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
         sc = render.Scene(now=now, language="fi", forecast=fmi.Forecast(now, []),
                           stops={}, battery_percent=40)
-        self.assertIsNone(render._status_warning(sc))
-        self.assertEqual(render._status_warning(replace(sc, battery_percent=15)), "Lataa akku")
+        self.assertEqual(render._status_warnings(sc), [])
+        self.assertEqual(render._status_warnings(replace(sc, battery_percent=15)), ["Lataa akku"])
         self.assertEqual(i18n.percent("fi", 87), "87\u202f%")
         self.assertEqual(i18n.percent("en", 87), "87%")
 
