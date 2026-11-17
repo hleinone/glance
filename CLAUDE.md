@@ -25,7 +25,7 @@ How this project is worked on. The folders' files have the specifics; these hold
 
 1. **Nothing about this installation in a tracked file.** Hostnames, addresses, user names, the real stops, coordinates and schedule, the state of the household's machines, and the time of day of anything it did all go in `CLAUDE.local.md` or the git-ignored local config (`config.local.toml`, `mise.local.toml`, `secrets.h`). Tracked examples, tests and the screenshot use Pasila. Wording counts too ("night wakes" gives a time away). Before a commit, look for such details in what changed.
 2. **Say what was checked, and how.** "Works" means it ran: against the live API, on the Pi, on the device. What is built but hasn't run where it matters goes in that folder's "Not yet tried" list, and comes off when it has.
-3. **Fail towards the last good state.** A failed or odd fetch keeps the last good data and shows its age; a bad config stops the deploy, not the running service; a failed update on the device costs a retry, not the battery. No error may end a background thread or leave the device awake.
+3. **Fail towards the last good state.** A failed or odd fetch keeps the last good data and shows its age; a bad config stops the deploy, not the running service (not yet true of every bad config: see Where it stands); a failed update on the device costs a retry, not the battery. No error may end a background thread or leave the device awake.
 4. **Check at the edges.** Whatever comes from outside (config values, API answers, request parameters, the server's answer on the device) is checked where it enters, with a message that says what to change. Text and numbers from an API are data to draw, never paths or commands.
 5. **Battery first on the device.** Every second awake and every panel refresh costs; whatever can be decided on the server is decided there.
 6. **Few dependencies, pinned.** The server needs only Pillow (Debian's package on the Pi). The firmware's platform and library are pinned by version and commit; raise them deliberately.
@@ -48,7 +48,7 @@ Running: the server on the Pi and the firmware on the device, both as of e428796
 Open:
 
 1. Battery: once a full discharge is logged in `cache/battery.csv` on the Pi, fit the percentage curve from it, or at least check the low end, where the warning appears.
-2. A deploy refused by its check leaves the new code and config on the Pi, so the next restart of the service loads them and fails until a good deploy (seen on the Pi).
+2. A failed deploy can leave the service down until a good one. One refused by its check has already put the new code and config on the Pi, so the service's next restart loads them; one whose service doesn't stay up has already restarted it with them. Both seen on the Pi.
 3. The wait for network time leaves its `sleep` behind when it runs out, and systemd logs "Found left-over process" as the service starts. Harmless.
 4. The paths in the server's "Not yet tried" list.
 5. Maybe: a fixed device IP to skip DHCP (~1 s per wake); hiding departures that leave before the next wake.
