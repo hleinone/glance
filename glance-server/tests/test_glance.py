@@ -857,10 +857,10 @@ class SunriseSunsetTest(unittest.TestCase):
         # FMI's sunrise for Utsjoki that day: 08:07:38.
         self.assertLess(abs(autumn.sunrise - datetime(2026, 10, 25, 8, 7, 38, tzinfo=HELSINKI)), timedelta(minutes=1))
 
-    def time_row_greys(self, now: datetime, rising: bool, place: tuple[float, float] = (60.16952, 24.93545)) -> set[int]:
-        """The greys drawn in the sunrise's time (the upper row) or the sunset's,
-        right of its sun (by default in Helsinki, on 18 November: 08:26:28 and
-        15:43:36). At 266 px wide the day's length is one line."""
+    def row_greys(self, now: datetime, rising: bool, place: tuple[float, float] = (60.16952, 24.93545)) -> tuple[set, set]:
+        """The greys drawn in the sunrise's row (the upper) or the sunset's: in
+        its sun, and in its time right of the sun (by default in Helsinki, on 18
+        November: 08:26:28 and 15:43:36). At 266 px wide the day's length is one line."""
         from PIL import Image, ImageDraw
         d = sun.day(*place, now.date(), HELSINKI)
         sc = render.Scene(now=now, language="fi", forecast=None, stops={}, sun=d)
@@ -870,24 +870,34 @@ class SunriseSunsetTest(unittest.TestCase):
         top = round(75 - (2 * sunrise_sunset.ROW + sunrise_sunset.GAP + sunrise_sunset.LINE) / 2)
         if not rising:
             top += sunrise_sunset.ROW
-        box = (sunrise_sunset.PAD + sunrise_sunset.ICON_W + sunrise_sunset.ICON_GAP, top, 266, top + sunrise_sunset.ROW)
-        return {grey for _, grey in img.crop(box).getcolors()}
+        split = sunrise_sunset.PAD + sunrise_sunset.ICON_W
+        boxes = ((sunrise_sunset.PAD, top, split, top + sunrise_sunset.ROW),
+                 (split + sunrise_sunset.ICON_GAP, top, 266, top + sunrise_sunset.ROW))
+        return tuple({grey for _, grey in img.crop(box).getcolors()} for box in boxes)
 
-    def test_a_time_turns_light_grey_from_its_own_minute(self):
+    def assert_to_come(self, now: datetime, rising: bool, **place):
+        for part, greys in zip(("sun", "time"), self.row_greys(now, rising, **place)):
+            with self.subTest(part=part, now=now, rising=rising):
+                self.assertIn(draw.BLACK, greys)
+
+    def assert_past(self, now: datetime, rising: bool, **place):
+        for part, greys in zip(("sun", "time"), self.row_greys(now, rising, **place)):
+            with self.subTest(part=part, now=now, rising=rising):
+                self.assertEqual(greys, {draw.LIGHT, draw.WHITE})
+
+    def test_a_time_and_its_sun_turn_light_grey_from_its_own_minute(self):
         # Shown as 08.26 and 15.44, rounded to the nearest minute.
-        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 8, 25, 59, tzinfo=HELSINKI), rising=True))
-        self.assertEqual(self.time_row_greys(datetime(2026, 11, 18, 8, 26, tzinfo=HELSINKI), rising=True),
-                         {draw.LIGHT, draw.WHITE})
-        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 8, 26, tzinfo=HELSINKI), rising=False))
-        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 15, 43, 59, tzinfo=HELSINKI), rising=False))
-        self.assertEqual(self.time_row_greys(datetime(2026, 11, 18, 15, 44, tzinfo=HELSINKI), rising=False),
-                         {draw.LIGHT, draw.WHITE})
+        self.assert_to_come(datetime(2026, 11, 18, 8, 25, 59, tzinfo=HELSINKI), rising=True)
+        self.assert_past(datetime(2026, 11, 18, 8, 26, tzinfo=HELSINKI), rising=True)
+        self.assert_to_come(datetime(2026, 11, 18, 8, 26, tzinfo=HELSINKI), rising=False)
+        self.assert_to_come(datetime(2026, 11, 18, 15, 43, 59, tzinfo=HELSINKI), rising=False)
+        self.assert_past(datetime(2026, 11, 18, 15, 44, tzinfo=HELSINKI), rising=False)
 
     def test_no_sunrise_is_grey_since_nothing_is_to_come(self):
         utsjoki = (69.90864, 27.02843)  # 27 July: up all night, sets at 00.43 on the 28th
         noon = datetime(2026, 7, 27, 12, tzinfo=HELSINKI)
-        self.assertEqual(self.time_row_greys(noon, rising=True, place=utsjoki), {draw.LIGHT, draw.WHITE})
-        self.assertIn(draw.BLACK, self.time_row_greys(noon, rising=False, place=utsjoki))
+        self.assert_past(noon, rising=True, place=utsjoki)
+        self.assert_to_come(noon, rising=False, place=utsjoki)
 
     def test_in_one_column_nothing_is_cut_short_all_year(self):
         # One column of a six-column screen is 133 px wide, and the smallest

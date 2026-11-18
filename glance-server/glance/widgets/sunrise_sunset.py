@@ -44,14 +44,15 @@ GAP = 6  # between the rows and the lines below
 ICON_W = 42  # the horizon icons' width, as tools/build_fmi_icons.py makes them
 ICON_GAP = 6
 LINE = 18  # the day's length, a line of it
-LINE_SIZES = range(16, 12, -1)  # a wording that needs smaller text than these gives way to a shorter one
+LINE_SIZES = range(16, 12, -1)  # the day's length: the size comes first, then the wording (see fitting)
 
 
 @dataclass(frozen=True)
 class SunriseSunset:
     TYPE: ClassVar[str] = TYPE
     wants: ClassVar[None] = None  # calculated from [location]: no source is asked
-    # One column of a six-column screen: the widest time ("04.44") fits beside its sun at 20 px.
+    # One column of a six-column screen: the widest time ("04.44") fits beside its sun at 20 px,
+    # and the polar words, with their date on a line of its own.
     MIN_SIZE: ClassVar[tuple[int, int]] = (125, 130)
 
 
