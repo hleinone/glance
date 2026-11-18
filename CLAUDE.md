@@ -41,13 +41,13 @@ A home network: the server has no login and speaks plain HTTP, by choice (its cl
 
 Accepted, not fixed: anyone on the home network can view the dashboard, send a false battery level or a refresh (by adding the client header) or keep the service's threads busy; something answering at the server's address could feed the device its own image; the Wi-Fi password can be read from the device's flash over USB (flash encryption burns eFuses for good). Fixing those needs a shared secret or TLS on both sides, left out to keep the firmware trivial. A guest or IoT network for the device is the answer if it matters.
 
-## Where it stands (2026-11-17)
+## Where it stands (2026-11-18)
 
-Running: the server on the Pi as of 40f33f2 (Finland's electricity spot prices, GL-4, with each data source reading its own settings), deployed 2026-11-17; its first spot price fetch and the device's next request after it went through with no warning. The firmware on the device as of e428796, which GL-4 didn't change. Every path the device's notes listed as untried before then has been seen on the device; what neither part has seen yet is in their lists.
+Running: the server on the Pi as of 40f33f2 (Finland's electricity spot prices, GL-4, with each data source reading its own settings), deployed 2026-11-17; its first spot price fetch and the device's next request after it went through with no warning. The firmware on the device as of a026594 (a sound on a press in place of the refreshing mark, GL-3), flashed 2026-11-18; its paths were seen on the device with a stand-in server, except the two its review added, which are in the device's "Not yet tried" with the sleep current. What neither part has seen yet is in their lists.
 
 Open:
 
-1. Battery: once a full discharge is logged in `cache/battery.csv` on the Pi, fit the percentage curve from it, or at least check the low end, where the warning appears.
+1. Battery: GL-3 was M1's last planned flash, so a full discharge can now be logged in `cache/battery.csv` on the Pi (flashing over USB charges the cell). Once it is, fit the percentage curve from it, or at least check the low end, where the warning appears.
 2. A failed deploy can leave the service down until a good one (GL-11). One refused by its check has already put the new code and config on the Pi, so the service's next restart loads them; one whose service doesn't stay up has already restarted it with them. Both seen on the Pi.
 3. The wait for network time leaves its `sleep` behind when it runs out, and systemd logs "Found left-over process" as the service starts. Harmless (GL-12).
 4. A weather cache whose `fetched_at` has no time zone stops weather fetches until the file is deleted: each refresh fails comparing it with the clock, outside the part that catches fetch failures (GL-14). Only a damaged or hand-edited file has one; the source always writes the time zone.
