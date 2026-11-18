@@ -178,6 +178,7 @@ static void play_press_sound(Button button) {
   ledcWrite(PIN_BUZZER, 0);
   ledcDetach(PIN_BUZZER);
   buzzer_quiet();
+  // millis() counts from the firmware's start: the boot before it isn't included.
   LOG.printf("[sound] %s at %lu ms since boot\n", BUTTON_NAME[button], (unsigned long)at);
 }
 
@@ -544,8 +545,8 @@ static void deep_sleep(uint32_t ms) {
   awake_limit_hits = 0;  // got here by itself: nothing hung
   const Button pressed = pressed_while_awake();
   if (pressed != NO_BUTTON && worth_doing(pressed)) {
-    // Its sound now, as soon as it is noticed: the panel's refresh kept the
-    // chip busy. The update it asked for follows silently.
+    // Its sound now, as soon as it is noticed: setup() was waiting in the
+    // panel's refresh. The update it asked for follows silently.
     play_press_sound(pressed);
     pending_button = pressed;
     ms = 500;  // come straight back for the update the press asked for
@@ -635,7 +636,16 @@ void setup() {
   epaper.initGrayMode(GRAY_LEVEL4);
 
   Fetch fetch;
-  if (connect_wifi()) fetch = fetch_and_draw(battery_mv, button);
+  if (connect_wifi()) {
+    fetch = fetch_and_draw(battery_mv, button);
+    if (fetch.no_change && offline_mark_shown) {
+      // Back online, but the press changes nothing (the deck shrank to one
+      // screen since the last update) and the offline mark is still up, though
+      // the server answered: fetch the image as a timed wake would, to replace it.
+      LOG.println("[glance] offline mark up but nothing changed: fetching the image to replace it");
+      fetch = fetch_and_draw(battery_mv, NO_BUTTON);
+    }
+  }
   if (fetch.no_change) {
     // Nothing to draw: the panel keeps its image. Sleep as the server said.
     if (failures) LOG.printf("[glance] back online after %lu failed updates\n", (unsigned long)failures);
