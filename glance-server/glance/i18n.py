@@ -1,10 +1,10 @@
-"""English and Finnish: formats for dates, times, ages, decimals and percentages, and
+"""English and Finnish: formats for dates, times, ages, durations, decimals and percentages, and
 looking up a part's own words. Each part that shows words keeps them itself,
 as WORDS = {"en": {...}, "fi": {...}}: a widget, a source, the status bar."""
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 WEEKDAYS = {
     "en": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
@@ -29,6 +29,20 @@ def date(language: str, when: datetime) -> str:
     if language == "fi":
         return f"{weekday.capitalize()} {when.day}.{when.month}."
     return f"{weekday} {when.day} {MONTHS_EN[when.month - 1]}"
+
+
+def day_month(language: str, when: date) -> str:
+    """'17.1.' in Finnish, '17 Jan' in English."""
+    return f"{when.day}.{when.month}." if language == "fi" else f"{when.day} {MONTHS_EN[when.month - 1][:3]}"
+
+
+def duration(minutes: int, signed: bool = False) -> str:
+    """'7 h 17 min', '45 min', '24 h'; signed: '+4 min', '−1 h 5 min', '±0 min'."""
+    hours, rest = divmod(abs(minutes), 60)
+    text = " ".join(part for part in (f"{hours} h" if hours else "", f"{rest} min" if rest or not hours else "") if part)
+    if not signed:
+        return text
+    return ("+" if minutes > 0 else "−" if minutes < 0 else "±") + text
 
 
 def decimal(language: str, value: float, places: int = 1) -> str:

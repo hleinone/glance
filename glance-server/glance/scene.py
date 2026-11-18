@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
+from . import sun
 from .sources import elering, fmi
 from .sources.hsl import StopDepartures, stale
 
@@ -26,6 +27,7 @@ class Scene:
     # What the sources say is old or missing, for the status bar.
     warnings: tuple[str, ...] = ()
     spot_prices: elering.Prices | None = None
+    sun: sun.Day | None = None  # today's, at [location]
 
     @property
     def departures_stale(self) -> bool:

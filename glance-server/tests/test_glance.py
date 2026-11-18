@@ -6,14 +6,14 @@ import tempfile
 import unittest
 import urllib.parse
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 from zoneinfo import ZoneInfo
 
-from glance import battery, config, decks, draw, i18n, layout, render, schedule, widgets
+from glance import battery, config, decks, draw, i18n, layout, render, schedule, sun, widgets
 from glance.sources import elering, fmi, hsl
-from glance.widgets import fmi_symbols, fmi_weather_hourly, hsl_stops, spot_prices
+from glance.widgets import fmi_symbols, fmi_weather_hourly, hsl_stops, spot_prices, sunrise_sunset
 
 DATA = Path(__file__).parent / "data"
 HELSINKI = ZoneInfo("Europe/Helsinki")
@@ -211,6 +211,17 @@ class FormatTest(unittest.TestCase):
         self.assertEqual(i18n.clock("en", t), "07:05")
         self.assertEqual(i18n.clock("fi", t), "07.05")
         self.assertEqual(i18n.age(130), "2 h 10 min")
+
+    def test_durations_and_short_dates(self):
+        self.assertEqual(i18n.duration(437), "7 h 17 min")
+        self.assertEqual(i18n.duration(45), "45 min")
+        self.assertEqual(i18n.duration(1440), "24 h")
+        self.assertEqual(i18n.duration(0), "0 min")
+        self.assertEqual(i18n.duration(4, signed=True), "+4 min")
+        self.assertEqual(i18n.duration(-65, signed=True), "−1 h 5 min")  # a real minus sign
+        self.assertEqual(i18n.duration(0, signed=True), "±0 min")
+        self.assertEqual(i18n.day_month("fi", datetime(2027, 1, 17)), "17.1.")
+        self.assertEqual(i18n.day_month("en", datetime(2027, 1, 17)), "17 Jan")
 
 
 def _stoptime(service_day, seconds, route, headsign, mode="BUS", realtime=True, delay=0):
@@ -834,6 +845,48 @@ def quarter_prices(first: datetime, values: list[float]) -> elering.Prices:
     return elering.Prices(start, tuple(elering.Price(start + i * timedelta(minutes=15), v) for i, v in enumerate(values)))
 
 
+class SunriseSunsetTest(unittest.TestCase):
+    def test_the_scene_has_todays_sun_at_the_configured_location(self):
+        from glance.__main__ import scene
+        from glance.sources import Sources
+        cfg = isolated_config(self, stops=[], lat=69.90864, lon=27.02843)  # Utsjoki
+        sources = Sources.make(cfg)
+        winter = scene(cfg, sources, datetime(2026, 12, 21, 12, tzinfo=HELSINKI)).sun
+        self.assertEqual((winter.date, winter.polar), (date(2026, 12, 21), "night"))
+        autumn = scene(cfg, sources, datetime(2026, 10, 25, 12, tzinfo=HELSINKI)).sun
+        # FMI's sunrise for Utsjoki that day: 08:07:38.
+        self.assertLess(abs(autumn.sunrise - datetime(2026, 10, 25, 8, 7, 38, tzinfo=HELSINKI)), timedelta(minutes=1))
+
+    def time_row_greys(self, now: datetime, left: bool) -> set[int]:
+        """The greys drawn where the sunrise (left) or sunset time is."""
+        from PIL import Image, ImageDraw
+        d = sun.day(60.16952, 24.93545, now.date(), HELSINKI)  # Helsinki: 08:26:28 and 15:43:36
+        sc = render.Scene(now=now, language="fi", forecast=None, stops={}, sun=d)
+        img = Image.new("L", (266, 150), 255)
+        sunrise_sunset.draw(img, ImageDraw.Draw(img), sc, (0, 0, 266, 150), "u", widgets.SunriseSunset())
+        img = draw.quantise(img)
+        top = round(75 - (sunrise_sunset.TIME_ROW + sunrise_sunset.LINE_GAP + sunrise_sunset.LINE) / 2)
+        box = (0, top, 133, top + sunrise_sunset.TIME_ROW) if left else (133, top, 266, top + sunrise_sunset.TIME_ROW)
+        return {grey for _, grey in img.crop(box).getcolors()}
+
+    def test_a_time_turns_light_grey_from_its_own_minute(self):
+        # Shown as 08.26 and 15.44, rounded to the nearest minute.
+        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 8, 25, 59, tzinfo=HELSINKI), left=True))
+        self.assertEqual(self.time_row_greys(datetime(2026, 11, 18, 8, 26, tzinfo=HELSINKI), left=True),
+                         {draw.LIGHT, draw.WHITE})
+        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 8, 26, tzinfo=HELSINKI), left=False))
+        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 15, 43, 59, tzinfo=HELSINKI), left=False))
+        self.assertEqual(self.time_row_greys(datetime(2026, 11, 18, 15, 44, tzinfo=HELSINKI), left=False),
+                         {draw.LIGHT, draw.WHITE})
+
+    def test_without_the_sun_in_the_scene_it_fails_loudly(self):
+        from PIL import Image, ImageDraw
+        sc = render.Scene(now=datetime(2026, 11, 18, 12, tzinfo=HELSINKI), language="fi", forecast=None, stops={})
+        img = Image.new("L", (266, 150), 255)
+        with self.assertRaises(ValueError):
+            sunrise_sunset.draw(img, ImageDraw.Draw(img), sc, (0, 0, 266, 150), "u", widgets.SunriseSunset())
+
+
 class SpotPricesTest(unittest.TestCase):
     NOW = datetime(2027, 1, 19, 16, 42, 30, tzinfo=HELSINKI)
 
@@ -1015,6 +1068,29 @@ class WidgetSizeTest(unittest.TestCase):
                     with self.subTest(size=size, language=language, prices=prices is not None):
                         self.assertIsNone(self.drawn_outside(widget, size, sc))
 
+    def test_sunrise_and_sunset_stay_inside(self):
+        widget = widgets.SunriseSunset()
+        min_w, min_h = widget.MIN_SIZE
+        on = self.NOW.date()
+        # The widest a day gets: two times of four digits, a day of 23 h 59 min
+        # whose change is over an hour, both polar spells, and the night the
+        # sun stays up (no sunrise).
+        widest = sun.Day(on, self.NOW.replace(hour=20, minute=0), self.NOW.replace(hour=23, minute=58),
+                         timedelta(hours=23, minutes=59), -timedelta(hours=23, minutes=58), None)
+        days = (
+            widest,
+            sun.Day(on, None, None, timedelta(), timedelta(minutes=-58), "night", self.NOW + timedelta(days=50)),
+            sun.Day(on, None, None, timedelta(days=1), timedelta(minutes=58), "day", self.NOW + timedelta(days=50)),
+            sun.Day(on, None, None, timedelta(days=1), timedelta(), "day", None),
+            replace(widest, sunrise=None),
+        )
+        for size in ((min_w, min_h), (267, 150), (533, 150), (min_w, 450), (800, min_h)):
+            for language in ("en", "fi"):
+                for d in days:
+                    sc = replace(self.worst_case(language, False), sun=d)
+                    with self.subTest(size=size, language=language, day=d):
+                        self.assertIsNone(self.drawn_outside(widget, size, sc))
+
     def test_fill(self):
         self.assertEqual(fmi_weather_hourly.hours_fitting(533), 12)  # 4 of 6 columns: as before layouts were configurable
         self.assertEqual(fmi_weather_hourly.hours_fitting(267), 6)
@@ -1025,7 +1101,7 @@ class WidgetSizeTest(unittest.TestCase):
 
     def test_too_small_fails_at_load(self):
         sections = {"w": {"type": "fmi_weather_now"}, "h": {"type": "fmi_weather_hourly"},
-                    "s": {"type": "hsl_stops"}, "x": {"type": "hsl_stops"}}
+                    "s": {"type": "hsl_stops"}, "x": {"type": "hsl_stops"}, "u": {"type": "sunrise_sunset"}}
 
         def load(grid):
             return config._setup({"screens": {"s": {"grid": grid}}, "widgets": sections})
@@ -1038,6 +1114,7 @@ class WidgetSizeTest(unittest.TestCase):
             (".\n" * 8 + "x", r"'x' .* 1×9 grid it gets 800×50: give it 2 rows"),
             ("h" + " ." * 11 + "\n" + (". " * 12 + "\n") * 5,
              r"'h' .* 12×6 grid it gets 67×75: give it 3 columns and 2 rows"),
+            ("w h\n" * 6 + "u h", r"'u' \(sunrise_sunset\) needs at least 240×80 px; in this 2×7 grid it gets 400×64: give it 2 rows"),
         ):
             with self.subTest(grid=grid), self.assertRaisesRegex(ValueError, message):
                 load(grid)
