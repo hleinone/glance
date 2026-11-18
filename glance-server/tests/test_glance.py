@@ -858,9 +858,9 @@ class SunriseSunsetTest(unittest.TestCase):
         self.assertLess(abs(autumn.sunrise - datetime(2026, 10, 25, 8, 7, 38, tzinfo=HELSINKI)), timedelta(minutes=1))
 
     def time_row_greys(self, now: datetime, rising: bool, place: tuple[float, float] = (60.16952, 24.93545)) -> set[int]:
-        """The greys drawn in the sunrise's row (the upper) or the sunset's, sun
-        and time (by default in Helsinki, on 18 November: 08:26:28 and 15:43:36).
-        At 266 px wide the day's length is one line."""
+        """The greys drawn in the sunrise's time (the upper row) or the sunset's,
+        right of its sun (by default in Helsinki, on 18 November: 08:26:28 and
+        15:43:36). At 266 px wide the day's length is one line."""
         from PIL import Image, ImageDraw
         d = sun.day(*place, now.date(), HELSINKI)
         sc = render.Scene(now=now, language="fi", forecast=None, stops={}, sun=d)
@@ -870,7 +870,7 @@ class SunriseSunsetTest(unittest.TestCase):
         top = round(75 - (2 * sunrise_sunset.ROW + sunrise_sunset.GAP + sunrise_sunset.LINE) / 2)
         if not rising:
             top += sunrise_sunset.ROW
-        box = (0, top, 266, top + sunrise_sunset.ROW)
+        box = (sunrise_sunset.PAD + sunrise_sunset.ICON_W + sunrise_sunset.ICON_GAP, top, 266, top + sunrise_sunset.ROW)
         return {grey for _, grey in img.crop(box).getcolors()}
 
     def test_a_time_turns_light_grey_from_its_own_minute(self):
@@ -901,11 +901,28 @@ class SunriseSunsetTest(unittest.TestCase):
                 d = sun.day(lat, lon, date(2026, 1, 1) + timedelta(days=k), HELSINKI)
                 for language in ("en", "fi"):
                     with self.subTest(lat=lat, on=d.date, language=language):
-                        _, lines = sunrise_sunset.fitting(sunrise_sunset.line_choices(d, language), width)
+                        _, lines = sunrise_sunset.fitting(*sunrise_sunset.line_choices(d, language), width)
                         self.assertFalse(any(line.endswith("…") for line in lines))
-        widest = clock("fi", datetime(2026, 1, 1, 23, 59))
-        beside = width - sunrise_sunset.horizon(True, False).width - sunrise_sunset.ICON_GAP
-        self.assertLessEqual(draw.font("display", 20).getlength(widest), beside)
+        f = draw.font("display", 20)
+        midnight = datetime(2026, 1, 1)
+        widest = max((clock(language, midnight + timedelta(minutes=m)) for m in range(24 * 60) for language in ("en", "fi")),
+                     key=f.getlength)
+        self.assertLessEqual(f.getlength(widest), width - sunrise_sunset.ICON_W - sunrise_sunset.ICON_GAP)
+
+    def test_the_suns_tell_rising_from_setting_when_past_too(self):
+        icons = {(rising, past): sunrise_sunset.horizon(rising, past) for rising in (True, False) for past in (True, False)}
+        self.assertEqual({icon.width for icon in icons.values()}, {sunrise_sunset.ICON_W})
+        for past in (False, True):
+            self.assertNotEqual(icons[True, past].tobytes(), icons[False, past].tobytes())
+        for rising in (True, False):  # a passed sun has no black
+            self.assertNotIn(draw.BLACK, {grey for _, grey in draw.quantise(icons[rising, True]).getcolors()})
+
+    def test_both_times_are_drawn_the_same_size(self):
+        # 11.11 alone would fit bigger than 23.59 beside it.
+        width = 125 - 2 * sunrise_sunset.PAD - sunrise_sunset.ICON_W - sunrise_sunset.ICON_GAP
+        f = sunrise_sunset.largest("display", ["11.11", "23.59"], range(36, 19, -1), width)
+        self.assertEqual(f.size, sunrise_sunset.largest("display", ["23.59"], range(36, 19, -1), width).size)
+        self.assertLess(f.size, sunrise_sunset.largest("display", ["11.11"], range(36, 19, -1), width).size)
 
     def test_without_the_sun_in_the_scene_it_fails_loudly(self):
         from PIL import Image, ImageDraw

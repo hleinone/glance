@@ -51,9 +51,10 @@ flowchart LR
   time; until then the hours still unknown are marked. Nord Pool's day-ahead
   prices, from Elering's open data (no key needed).
 - **Sun:** today's sunrise and sunset at your location, beside FMI's sun on the
-  horizon, and the day's length with how it changed since yesterday. A time already past turns grey. In
-  Lapland's polar night or midnight sun, it says so and when the sun next
-  rises or sets. Calculated on the server, so nothing is fetched.
+  horizon, and the day's length with how it changed since yesterday. A time
+  already past turns grey. In Lapland's polar night or midnight sun, it says
+  so and when the sun next rises or sets. Calculated on the server, so
+  nothing is fetched.
 - **Battery-aware schedule:** the server tells the device when to wake next
   (e.g. every minute on weekday mornings, every 5 minutes otherwise, every
   15 at night), aimed just after the minute changes so the clock is right.
