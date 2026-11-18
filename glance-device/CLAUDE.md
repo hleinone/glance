@@ -16,6 +16,7 @@ mise tasks here: `mise run build`, `mise run upload` (reTerminal on USB-C; it wo
 - Logs and flashing go through an on-board USB-to-serial bridge on UART1 (GPIO43 TX, GPIO44 RX): `Serial1`, not USB CDC.
 - Battery: drive GPIO21 high, read the ADC on GPIO1, double it.
 - Buttons, pressed = low (checked on the device; Seeed's ESPHome page has them wrong): left white GPIO5, middle white GPIO4, right green GPIO3.
+- Buzzer: GPIO45, sounded with a square wave from LEDC (checked on the device). GPIO45 is a strapping pin (flash voltage, low by default), so it is driven low when silent and held low through deep sleep (`gpio_hold_en` and `gpio_deep_sleep_hold_en`; released at boot). Wakes after a held sleep were seen to boot normally; the sleep current with the hold has not been measured.
 
 ## Drawing
 
@@ -38,6 +39,7 @@ The battery is read before Wi-Fi starts, since the radio makes the voltage sag (
 - A press during an update is caught by an interrupt and gets its own update right after (`pending_button` in RTC memory, a 0.5 s sleep; the last press wins).
 - On a deck of one screen (`X-Glance-Deck-Size`, kept in RTC memory) a white press goes straight back to sleep until the planned wake (`wake_due_ms`, on the RTC clock, which keeps counting through deep sleep). A `204` answer means nothing to draw.
 - A failed attempt carries its button to the retry only if the server never answered, or if it was a refresh: a step the server already made would otherwise be made twice.
+- A press that will change the screen gets a sound at once, since the new image takes about 10 s: one beep for the green button (2 kHz, 70 ms), a shorter, higher tick for the white ones (3 kHz, 25 ms), both at half duty. On a button wake it plays after the battery reading and before the panel and Wi-Fi start, about 50 ms after the firmware starts (the log's "since boot"; the boot before it, from the press, isn't counted and hasn't been measured). A press during an update gets its sound when that update ends (`setup()` is waiting in the panel's refresh until then), and the update it asked for is silent. Silent: timed wakes, retries, a white press on a deck of one, an empty battery. The same sound at all hours, since a press is always someone's own (the founder's choice, GL-3).
 
 Lessons:
 
@@ -45,12 +47,11 @@ Lessons:
 - Use falling edges, never the pin's level: the display driver blocks interrupts for long stretches, so the handler can run after the button is released.
 - The button that woke the device is ignored for its first second (its release bounces).
 
-## Marks in the status bar
+## The offline mark
 
-The device draws two marks itself, as a white badge at the right end of the status bar (x 704–800, over the battery level), with a black-and-white partial refresh (~1.1 s) that leaves the rest of the image alone:
+The device draws one mark itself, as a white badge at the right end of the status bar (x 704–800, over the battery level), with a black-and-white partial refresh (~1.1 s) that leaves the rest of the image alone: **offline** (a crossed-out cloud), from the third failed update in a row, and at once when a press fails, since the press's sound promised a change; once per outage. The next full refresh replaces it. There is no text because the built-in fonts have no ä or ö.
 
-- **Refreshing** (two circling arrows): at once on a press, since the new image takes about 10 s to appear. Wi-Fi starts first and connects meanwhile, so the mark costs no time awake. Not on timed wakes: it would flash the corner at every one.
-- **Offline** (a crossed-out cloud): from the third failed update in a row, once per outage; and at once when the refreshing mark is up, since that can't be left there. The next full refresh replaces it. There is no text because the built-in fonts have no ä or ö.
+A press draws no mark of its own: its sound says it was heard (GL-3), which costs no partial refresh and doesn't flash the corner at every press. A press answered `204` leaves the panel as it is, unless the offline mark is up: then the image is fetched once more, as a timed wake would, to replace it.
 
 Partial refresh works only in 1-bit mode (`deinitGrayMode()`). `push_mark()` runs the library's own sequence and also sends the inverse of the new image as the "old" one: the controller drives only the pixels that differ between the two, and what it held as "old" after a 4-grey refresh left smoothed edges undriven, which made the mark smudgy. It bypasses the library's sleep flag on purpose.
 
@@ -62,10 +63,12 @@ Partial refresh works only in 1-bit mode (`deinitGrayMode()`). `push_mark()` run
 - Awake limit: a one-shot timer started first thing in `setup()` (90 s; the worst normal update is under a minute) forces deep sleep with the backoff, counting its own hits in a row. Without it, anything that never returns keeps the device awake, and the display library waits for the panel's BUSY line with no timeout. Its callback runs in the esp_timer task beside the stuck `setup()`, so it only sets the wake-ups and sleeps.
 - Empty battery: a reading under 3300 mV (and over 0) skips the update before the panel and radio are powered, and looks again in 15 minutes. The threshold is a guess from the server's curve; whether the board protects the cell itself is unknown.
 - If the frame buffer wasn't allocated, the update counts as failed.
-- To try these paths again after a change: a throwaway server on the server's port (the real service stopped) that answers as needed, slow headers for the awake limit, `204` with a short or a too-long `X-Glance-Sleep`, `X-Glance-Deck-Size: 1`; nothing listening, for a press whose first attempt fails; and a test build with the threshold raised for the empty battery. Watch the serial log on USB.
+- To try these paths again after a change: a throwaway server that answers as needed (on the server's port with the real service stopped, or anywhere else with a test build whose `GLANCE_URL` points at it, which leaves the real service running), slow headers for the awake limit, `204` with a short or a too-long `X-Glance-Sleep`, `X-Glance-Deck-Size: 1`; nothing listening, for a press whose first attempt fails; and a test build with the threshold raised for the empty battery. Watch the serial log on USB.
 
 ## Not yet tried on the device
 
 - A press whose request the server answered but whose image then failed: the retry should not carry a white button (the server already stepped), and should carry the green one.
-- A white press answered `204` while the refreshing mark is up (the deck shrank to one screen since the last update): the device should fetch the image again to replace the mark.
 - A frame buffer that wasn't allocated (it needs a test build).
+- A white press answered `204` while the offline mark is up (the deck shrank to one screen during an outage): the device should fetch the image again to replace the mark.
+- The awake limit's sleep with the buzzer hold.
+- The deep-sleep current with GPIO45 held low: GL-9's logged discharge is what would show a drain.

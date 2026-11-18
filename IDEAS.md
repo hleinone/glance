@@ -14,7 +14,7 @@ Maybes for later, not planned work (that's under "Next steps" in `CLAUDE.md`). I
 
 Left over from the configurable layout work (screens, decks, buttons and widgets that fill their area were built 2026-11-12):
 
-- Light status bar: black text on white, as an option (`[status_bar] style = "light"`). The bar stays a fixed strip outside the grid, because the firmware draws its offline and refresh marks over the bar's right end; those marks are white badges made for a black bar, so they need a second look too.
+- Light status bar: black text on white, as an option (`[status_bar] style = "light"`). The bar stays a fixed strip outside the grid, because the firmware draws its offline mark over the bar's right end; that mark is a white badge made for a black bar, so it needs a second look too.
 - Smaller designed versions of widgets: 1×1 or half-height current weather (drop wind, then "feels like", a smaller icon), narrow stops without destinations.
 - Widgets that use a taller area: current weather and the hourly forecast leave the space below them empty.
 - Limits in the config: `max_departures`, `hours`, an hourly `step` (every 3 hours).

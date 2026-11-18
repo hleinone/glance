@@ -5,9 +5,9 @@
 // ones on the left step through the server's deck of screens (?button=prev,
 // ?button=next), the green one on the right asks for fresh data
 // (?button=refresh). The battery voltage goes along with every request
-// (?battery_mv=), and the server draws the level. An update for a press first
-// draws a small "refreshing" mark in the status bar, since the new image takes
-// 8 s or more to appear.
+// (?battery_mv=), and the server draws the level. A press is answered at once
+// with a sound from the buzzer, since the new image takes 8 s or more to
+// appear.
 //
 // The image comes as /glance.g2: the panel's own 4 greys at 2 bits per pixel
 // (4 pixels per byte, first pixel in the top bits, 0 = black .. 3 = white =
@@ -57,6 +57,11 @@ static const char *const BUTTON_NAME[] = {"none", "refresh", "next", "prev"};  /
 // battery voltage).
 static constexpr int PIN_BATTERY_ADC = 1;
 static constexpr int PIN_BATTERY_EN = 21;
+// Buzzer: GPIO45 (Seeed's guides for the reTerminal E series), sounded with a
+// square wave. Low when silent, and held low through deep sleep so it draws
+// nothing. GPIO45 is also a strapping pin (it picks the flash voltage at
+// reset, low being the default), so it is never left high.
+static constexpr gpio_num_t PIN_BUZZER = GPIO_NUM_45;
 
 static constexpr int DEFAULT_SLEEP_S = 60;  // if the server doesn't say
 // The shortest sleeps the server may ask for repeatedly. One short sleep is
@@ -68,7 +73,7 @@ static constexpr int SHORT_SLEEP_S = 10;
 static constexpr uint8_t SHORT_SLEEPS_ALLOWED = 2;
 RTC_DATA_ATTR static uint8_t short_sleeps = 0;  // in a row, kept across deep sleep
 // The longest the device stays awake. A normal update takes ~9 s, the worst
-// one (slow Wi-Fi, two fetches, both marks) under a minute. Without a limit,
+// one (slow Wi-Fi, the offline mark) under a minute. Without a limit,
 // anything that never returns keeps it awake until the battery is flat: the
 // display library waits for the panel's BUSY line with no timeout (its
 // CHECK_BUSY), so a panel that stopped answering would do that. At the limit
@@ -132,6 +137,51 @@ static int read_battery_mv() {
   return (mv > 2500 && mv < 5000) ? mv : 0;
 }
 
+// --- sound ----------------------------------------------------------------------
+
+// A press that will change the screen is answered at once with a sound, since
+// the new image takes about 10 s to appear: one beep for the green button
+// (fresh data), a shorter, higher tick for the white ones (another screen).
+// Timed wakes, retries and presses with nothing to change are silent.
+struct Sound {
+  uint32_t hz;
+  uint32_t ms;
+};
+static constexpr Sound REFRESH_SOUND = {2000, 70};
+static constexpr Sound STEP_SOUND = {3000, 25};
+// Of the 8-bit duty cycle: below half is quieter (a softer sound).
+static constexpr uint32_t SOUND_DUTY = 128;
+
+// The pin may still be held from the last deep sleep: release it, and keep it low.
+static void buzzer_quiet() {
+  gpio_hold_dis(PIN_BUZZER);
+  pinMode(PIN_BUZZER, OUTPUT);
+  digitalWrite(PIN_BUZZER, LOW);
+}
+
+// Keep the buzzer low through deep sleep (a digital pin would otherwise float).
+static void buzzer_hold_for_sleep() {
+  gpio_hold_en(PIN_BUZZER);
+  gpio_deep_sleep_hold_en();
+}
+
+static void play_press_sound(Button button) {
+  const Sound s = button == REFRESH ? REFRESH_SOUND : STEP_SOUND;
+  const uint32_t at = millis();
+  buzzer_quiet();
+  if (!ledcAttach(PIN_BUZZER, s.hz, 8)) {
+    LOG.println("[sound] could not drive the buzzer");
+    return;
+  }
+  ledcWrite(PIN_BUZZER, SOUND_DUTY);
+  delay(s.ms);
+  ledcWrite(PIN_BUZZER, 0);
+  ledcDetach(PIN_BUZZER);
+  buzzer_quiet();
+  // millis() counts from the firmware's start: the boot before it isn't included.
+  LOG.printf("[sound] %s at %lu ms since boot\n", BUTTON_NAME[button], (unsigned long)at);
+}
+
 // --- network --------------------------------------------------------------------
 
 // The access point found last time, kept across deep sleep: connecting to a
@@ -142,8 +192,8 @@ RTC_DATA_ATTR static uint8_t ap_bssid[6] = {};
 
 static uint32_t wifi_start = 0;
 
-// Start connecting. It carries on in the background, so the refreshing mark
-// can be drawn meanwhile; connect_wifi() waits for the result.
+// Start connecting. It carries on in the background while the frame buffer
+// is set up; connect_wifi() waits for the result.
 static void start_wifi() {
   wifi_start = millis();
   WiFi.mode(WIFI_STA);
@@ -285,15 +335,14 @@ static Fetch fetch_and_draw(int battery_mv, Button button) {
   return result;
 }
 
-// --- status bar marks -----------------------------------------------------------------
+// --- the offline mark -----------------------------------------------------------------
 
-// Two marks are drawn by the device itself, both as a white badge at the right
-// end of the status bar (black on the server's image, where the battery level
-// is), with a partial refresh that leaves the rest of the screen as it is:
-// "refreshing" (two circling arrows) when an update asks for fresh data, and
-// "offline" (a crossed-out cloud) after failed updates. Partial refresh works
-// only in black and white on this panel, so they are drawn in a 1-bit frame
-// buffer. The next successful update redraws everything.
+// The offline mark is drawn by the device itself, as a white badge at the
+// right end of the status bar (black on the server's image, where the battery
+// level is), with a partial refresh that leaves the rest of the screen as it
+// is: a crossed-out cloud, after failed updates. Partial refresh works only in
+// black and white on this panel, so it is drawn in a 1-bit frame buffer. The
+// next successful update redraws everything.
 static constexpr int MARK_X = 704, MARK_W = 96, MARK_H = 30;  // x and width multiples of 8
 
 static void thick_line(int x0, int y0, int x1, int y1, float w, uint32_t color) {
@@ -312,17 +361,6 @@ static void draw_offline_icon() {
   epaper.fillRect(762, 17, 16, 6, TFT_BLACK);
   thick_line(758, 24, 782, 6, 6, TFT_WHITE);
   thick_line(758, 24, 782, 6, 2.5, TFT_BLACK);
-}
-
-// Two arrows chasing each other round a ring centred at (770, 15): a ring,
-// two gaps cut into it, and an arrowhead at the clockwise end of each half.
-static void draw_refresh_icon() {
-  epaper.fillCircle(770, 15, 9, TFT_BLACK);
-  epaper.fillCircle(770, 15, 6, TFT_WHITE);
-  thick_line(770, 15, 781, 19, 6, TFT_WHITE);
-  thick_line(770, 15, 759, 11, 6, TFT_WHITE);
-  epaper.fillTriangle(773, 14, 782, 12, 779, 19, TFT_BLACK);
-  epaper.fillTriangle(767, 16, 758, 18, 761, 11, TFT_BLACK);
 }
 
 // The library's panel sequences are macros written for its own member
@@ -359,22 +397,21 @@ static void push_mark(const uint8_t *fb) {
   EPD_SLEEP();
 }
 
-// Draw a mark on the panel; false if it couldn't be drawn. Ends with the panel
-// asleep and the frame buffer in 1-bit mode.
-static bool show_mark(void (*draw_icon)(), const char *name) {
+// Draw the offline mark on the panel. Ends with the panel asleep and the frame
+// buffer in 1-bit mode.
+static void show_offline_mark() {
   epaper.deinitGrayMode();  // 1-bit frame buffer
   const auto *fb = static_cast<const uint8_t *>(epaper.getPointer());
   if (!fb) {
-    LOG.printf("[epd] no frame buffer for the %s mark\n", name);
-    return false;
+    LOG.println("[epd] no frame buffer for the offline mark");
+    return;
   }
   epaper.fillRect(MARK_X, 0, MARK_W, MARK_H, TFT_BLACK);
   epaper.fillRoundRect(744, 4, 52, 22, 4, TFT_WHITE);
-  draw_icon();
+  draw_offline_icon();
   const uint32_t start = millis();
   push_mark(fb);
-  LOG.printf("[epd] %s mark drawn in %lu ms\n", name, millis() - start);
-  return true;
+  LOG.printf("[epd] offline mark drawn in %lu ms\n", millis() - start);
 }
 
 // Power the panel down when there is nothing to draw. begin() switches the
@@ -491,6 +528,7 @@ static void on_awake_limit(void *) {
   wake_due_ms = rtc_now_ms() + retry_s * 1000LL;
   esp_sleep_enable_timer_wakeup(uint64_t(retry_s) * 1000000ULL);
   wake_on_buttons();
+  buzzer_hold_for_sleep();
   esp_deep_sleep_start();
 }
 
@@ -507,6 +545,9 @@ static void deep_sleep(uint32_t ms) {
   awake_limit_hits = 0;  // got here by itself: nothing hung
   const Button pressed = pressed_while_awake();
   if (pressed != NO_BUTTON && worth_doing(pressed)) {
+    // Its sound now, as soon as it is noticed: setup() was waiting in the
+    // panel's refresh. The update it asked for follows silently.
+    play_press_sound(pressed);
     pending_button = pressed;
     ms = 500;  // come straight back for the update the press asked for
   } else if (pressed != NO_BUTTON) {
@@ -525,6 +566,7 @@ static void deep_sleep(uint32_t ms) {
   }
   esp_sleep_enable_timer_wakeup(uint64_t(ms) * 1000ULL);
   wake_on_buttons();
+  buzzer_hold_for_sleep();
   esp_deep_sleep_start();
 }
 
@@ -550,6 +592,7 @@ void setup() {
   const uint32_t boot = millis();
   LOG.begin(115200, SERIAL_8N1, PIN_LOG_RX, PIN_LOG_TX);
   start_awake_limit();
+  buzzer_quiet();  // held low through the sleep just ended
   // Hand the button pins back from the RTC (sleep-time) domain to normal GPIO.
   for (gpio_num_t pin : BUTTONS) {
     rtc_gpio_deinit(pin);
@@ -559,6 +602,7 @@ void setup() {
   watch_buttons();
   Button button = pending_button;
   pending_button = NO_BUTTON;
+  bool pressed_now = false;  // woken by a press that has something to do: it gets its sound
   if (cause == ESP_SLEEP_WAKEUP_EXT1) {
     const uint64_t pins = esp_sleep_get_ext1_wakeup_status();
     for (int i = 0; i < NUM_BUTTONS; i++)
@@ -572,6 +616,7 @@ void setup() {
       if (left > 1000) deep_sleep(left);
       button = NO_BUTTON;  // the planned wake is due anyway: a normal update
     }
+    pressed_now = button != NO_BUTTON;
   } else {
     LOG.printf("\n[glance] %s%s%s\n", cause == ESP_SLEEP_WAKEUP_TIMER ? "timer wake" : "power on / reset",
                button != NO_BUTTON ? ", for a press: " : "", button != NO_BUTTON ? BUTTON_NAME[button] : "");
@@ -583,22 +628,22 @@ void setup() {
     LOG.printf("[battery] empty: no update, looking again in %d s\n", BATTERY_EMPTY_SLEEP_S);
     deep_sleep(BATTERY_EMPTY_SLEEP_S * 1000UL);
   }
+  // After the battery reading (nothing else drawing current while it is read),
+  // before the panel and the radio start.
+  if (pressed_now) play_press_sound(button);
   epaper.begin();
   start_wifi();
-  // A press takes a while to show (the server draws, then the panel's 6 s
-  // refresh): show at once that it was noticed. Wi-Fi connects meanwhile, so
-  // this costs little or no extra time awake.
-  const bool refresh_mark = button != NO_BUTTON && show_mark(draw_refresh_icon, "refreshing");
   epaper.initGrayMode(GRAY_LEVEL4);
 
   Fetch fetch;
   if (connect_wifi()) {
     fetch = fetch_and_draw(battery_mv, button);
-    if (fetch.no_change && refresh_mark) {
-      // The deck turned out to have one screen after all (it changed since the
-      // last update), and the mark is up with nothing under it: fetch the
-      // image as a timed wake would, to replace it.
-      LOG.println("[glance] mark up but nothing changed: fetching the image to replace it");
+    if (fetch.no_change && offline_mark_shown) {
+      // Back online, but the press changes nothing (the deck shrank to one
+      // screen since the last update) and the offline mark is still up, though
+      // the server answered: fetch the image as a timed wake would, to replace it.
+      LOG.println("[glance] offline mark up but nothing changed: fetching the image to replace it");
+      button = NO_BUTTON;  // the server answered the press: a failed fetch now doesn't carry it
       fetch = fetch_and_draw(battery_mv, NO_BUTTON);
     }
   }
@@ -624,10 +669,11 @@ void setup() {
       WiFi.disconnect(true);
       WiFi.mode(WIFI_OFF);
     }
-    // The refreshing mark can't be left up, and what was under it is gone, so
-    // a failed refresh shows the offline mark at once.
-    if (refresh_mark || (failures >= OFFLINE_MARK_AFTER && !offline_mark_shown)) {
-      show_mark(draw_offline_icon, "offline");  // ends with the panel asleep
+    // A press heard its sound and waits for the screen to change, so a failed
+    // one shows the offline mark at once; otherwise from the third failure in
+    // a row. Once per outage: it stays up until a full refresh replaces it.
+    if (!offline_mark_shown && (button != NO_BUTTON || failures >= OFFLINE_MARK_AFTER)) {
+      show_offline_mark();  // ends with the panel asleep
       offline_mark_shown = true;
     } else {
       panel_off();
