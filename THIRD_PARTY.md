@@ -18,7 +18,9 @@ responses (`glance-server/tests/data/`, see the README there):
 
 - **Weather:** Finnish Meteorological Institute open data, licensed under
   [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Source: Finnish
-  Meteorological Institute (Ilmatieteen laitos).
+  Meteorological Institute (Ilmatieteen laitos). The tests also hold a few
+  sunrise and sunset times FMI publishes (`glance-server/tests/test_sun.py`),
+  as expected values for the server's own calculation.
 - **Public transport:** Helsinki Region Transport (HSL) open data via the
   Digitransit API, licensed under
   [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Source: HSL.

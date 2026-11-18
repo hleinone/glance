@@ -1160,6 +1160,7 @@ class RenderTest(unittest.TestCase):
             language="en",
             forecast=fmi.Forecast(self.now - timedelta(minutes=5), hours),
             stops={w: hsl.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.wanted(hsl.StopRequest), "ABC"))},
+            sun=sun.day(self.cfg.lat, self.cfg.lon, self.now.date(), HELSINKI),
         )
 
     def assert_panel_image(self, img):

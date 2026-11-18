@@ -1,8 +1,8 @@
 # Glance
 
 A wall-mounted e-paper dashboard for Helsinki: weather from the Finnish
-Meteorological Institute (FMI), live public transport departures from HSL and
-Finland's electricity spot prices, on a battery-powered [Seeed reTerminal E1001](https://wiki.seeedstudio.com/reterminal_e10xx_main_page/)
+Meteorological Institute (FMI), live public transport departures from HSL,
+Finland's electricity spot prices and today's sunrise and sunset, on a battery-powered [Seeed reTerminal E1001](https://wiki.seeedstudio.com/reterminal_e10xx_main_page/)
 (7.5", 800×480, 4 greys).
 
 ![The dashboard: current weather, an hourly forecast and departures from three stops](docs/screenshot.png)
@@ -11,16 +11,17 @@ Finland's electricity spot prices, on a battery-powered [Seeed reTerminal E1001]
 at Pasila (`mise run screenshot`). On the panel it looks exactly like this.
 The interface is also available in Finnish.*
 
-![A second screen: an hourly forecast, departures from two stops, and the electricity spot price now and for the next 24 hours](docs/screenshot-summer.png)
+![A second screen: an hourly forecast, today's sunrise and sunset, departures from two stops, and the electricity spot price now and for the next 24 hours](docs/screenshot-summer.png)
 
 *A second screen on a summer afternoon, from sample data too: a sunny, windy
-day, when the spot price falls below zero around midday.*
+day, when the spot price falls below zero around midday. The sunrise has
+passed, so it is grey.*
 
 ## How it works
 
 A small server (a Raspberry Pi will do) fetches the weather, departures and
-spot prices, draws the whole screen as an image and serves it on the home
-network. The device only wakes up, downloads that image, shows it and goes
+spot prices, works out the sunrise and sunset, draws the whole screen as an
+image and serves it on the home network. The device only wakes up, downloads that image, shows it and goes
 back to deep sleep, so its firmware stays simple and its battery lasts.
 
 ```mermaid
@@ -49,6 +50,10 @@ flowchart LR
   in black with its price. Tomorrow's prices are published around 14 Finnish
   time; until then the hours still unknown are marked. Nord Pool's day-ahead
   prices, from Elering's open data (no key needed).
+- **Sun:** today's sunrise and sunset at your location, and the day's length
+  with how it changed since yesterday. A time already past turns grey. In
+  Lapland's polar night or midnight sun, it says so and when the sun next
+  rises or sets. Calculated on the server, so nothing is fetched.
 - **Battery-aware schedule:** the server tells the device when to wake next
   (e.g. every minute on weekday mornings, every 5 minutes otherwise, every
   15 at night), aimed just after the minute changes so the clock is right.
@@ -95,7 +100,7 @@ language = "en"     # the default is Finnish ("fi")
 [digitransit]
 key = "your-digitransit-key"
 
-[location]          # for the weather
+[location]          # for the weather and the sunrise and sunset
 lat = 60.1987
 lon = 24.9327
 
