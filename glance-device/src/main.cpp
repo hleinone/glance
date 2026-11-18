@@ -643,6 +643,7 @@ void setup() {
       // screen since the last update) and the offline mark is still up, though
       // the server answered: fetch the image as a timed wake would, to replace it.
       LOG.println("[glance] offline mark up but nothing changed: fetching the image to replace it");
+      button = NO_BUTTON;  // the server answered the press: a failed fetch now doesn't carry it
       fetch = fetch_and_draw(battery_mv, NO_BUTTON);
     }
   }
