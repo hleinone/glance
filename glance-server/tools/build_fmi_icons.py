@@ -15,6 +15,10 @@ Adaptations, because the originals are coloured and drawn with hairlines:
   order: the sun comes before the cloud, lightning after it)
 - snowflakes: black and thickened; raindrops: dark grey, black when small (told apart by
   path length: a drop is a short teardrop, a flake a long jagged outline)
+
+It also makes the sunrise and sunset widget's icons (icons/fmi/horizon/): symbol 1's
+sun cut at the horizon, with a horizon and a line of water; the rising disc light grey,
+the setting one black, and each also as a light grey line drawing for a time passed.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 import svg_render
 
@@ -132,11 +136,62 @@ def render_all() -> None:
             icon.save(out_dir / f"{code}.png", optimize=True)
 
 
+HORIZON_OUT = OUT / "horizon"
+HORIZON_SIZE = (42, 28)  # px: one row of the sunrise and sunset widget
+HORIZON_Y = 18.363  # the sun's centre in symbol 1: the horizon cuts it in half
+PAST = "#AAAAAA"
+
+
+def horizon_svg(rising: bool, past: bool) -> str:
+    """FMI's sun (symbol 1) cut at the horizon, over a horizon line and a line
+    of water. Rising: the disc light grey, as in the weather icons; setting:
+    black. Past: the same drawing in light grey lines, the rising disc white."""
+    sun = (SRC / "1.svg").read_text(encoding="utf-8")
+    polygon = re.search(r"<polygon\b[^>]*/>", sun).group(0)
+    circle = re.search(r"<circle\b[^>]*/>", sun).group(0)
+    line = PAST if past else "#000000"
+    rays = _set(_set(_set(polygon[len("<polygon"):-2], "fill", "#FFFFFF" if past else SUN), "stroke", line), "stroke-width", "0.7")
+    rays = _set(rays, "stroke-linejoin", "round")
+    disc_fill = (PAST if not rising else "#FFFFFF") if past else (SUN if rising else "#000000")
+    disc = _set(circle[len("<circle"):-2], "fill", disc_fill)
+    if past and rising:  # a white disc needs an outline to be seen
+        disc = _set(_set(disc, "stroke", PAST), "stroke-width", "0.7")
+    return svg_render.sized(
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="4.5 1 28 28">'
+        f'<defs><clipPath id="sky"><rect x="0" y="0" width="37" height="{HORIZON_Y}"/></clipPath></defs>'
+        f'<g clip-path="url(#sky)"><polygon{rays}/><circle{disc}/></g>'
+        f'<line x1="6" y1="{HORIZON_Y}" x2="31" y2="{HORIZON_Y}" stroke="{line}" stroke-width="1.6" stroke-linecap="round"/>'
+        f'<line x1="11.5" y1="{HORIZON_Y + 3.2}" x2="25.5" y2="{HORIZON_Y + 3.2}" stroke="{line}" stroke-width="1.3" stroke-linecap="round"/>'
+        "</svg>"
+    )
+
+
+def render_horizon() -> None:
+    names = {f"{'sunrise' if rising else 'sunset'}{'-past' if past else ''}": (rising, past)
+             for rising in (True, False) for past in (False, True)}
+    rendered = svg_render.quicklook({name: horizon_svg(*spec) for name, spec in names.items()})
+    # One box for all four, around their ink, widened to the output's shape.
+    x0, y0, x1, y1 = svg_render.ink_union(rendered.values())
+    w, h = HORIZON_SIZE
+    width = max(x1 - x0, (y1 - y0) * w / h) + 20
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    # The box can reach past the rendered square: crop from it inside a white margin,
+    # since a crop past the edge comes out black.
+    margin = svg_render.RENDER_PX
+    box = (round(cx - width / 2) + margin, round(cy - width * h / w / 2) + margin,
+           round(cx + width / 2) + margin, round(cy + width * h / w / 2) + margin)
+    HORIZON_OUT.mkdir(parents=True, exist_ok=True)
+    for name, im in rendered.items():
+        icon = ImageOps.expand(im, border=margin, fill=255).crop(box)
+        icon.resize(HORIZON_SIZE, Image.Resampling.LANCZOS).save(HORIZON_OUT / f"{name}.png", optimize=True)
+
+
 def main() -> None:
     svg_render.require_macos()
     fetch_sources()
     render_all()
-    print(f"wrote {len(CODES) * len(STYLES)} icons to {OUT.relative_to(ROOT)}/")
+    render_horizon()
+    print(f"wrote {len(CODES) * len(STYLES)} icons to {OUT.relative_to(ROOT)}/, and 4 to {HORIZON_OUT.relative_to(ROOT)}/")
 
 
 if __name__ == "__main__":

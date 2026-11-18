@@ -857,34 +857,55 @@ class SunriseSunsetTest(unittest.TestCase):
         # FMI's sunrise for Utsjoki that day: 08:07:38.
         self.assertLess(abs(autumn.sunrise - datetime(2026, 10, 25, 8, 7, 38, tzinfo=HELSINKI)), timedelta(minutes=1))
 
-    def time_row_greys(self, now: datetime, left: bool, place: tuple[float, float] = (60.16952, 24.93545)) -> set[int]:
-        """The greys drawn where the sunrise (left) or sunset time is (by default
-        in Helsinki, on 18 November: 08:26:28 and 15:43:36)."""
+    def time_row_greys(self, now: datetime, rising: bool, place: tuple[float, float] = (60.16952, 24.93545)) -> set[int]:
+        """The greys drawn in the sunrise's row (the upper) or the sunset's, sun
+        and time (by default in Helsinki, on 18 November: 08:26:28 and 15:43:36).
+        At 266 px wide the day's length is one line."""
         from PIL import Image, ImageDraw
         d = sun.day(*place, now.date(), HELSINKI)
         sc = render.Scene(now=now, language="fi", forecast=None, stops={}, sun=d)
         img = Image.new("L", (266, 150), 255)
         sunrise_sunset.draw(img, ImageDraw.Draw(img), sc, (0, 0, 266, 150), "u", widgets.SunriseSunset())
         img = draw.quantise(img)
-        top = round(75 - (sunrise_sunset.TIME_ROW + sunrise_sunset.LINE_GAP + sunrise_sunset.LINE) / 2)
-        box = (0, top, 133, top + sunrise_sunset.TIME_ROW) if left else (133, top, 266, top + sunrise_sunset.TIME_ROW)
+        top = round(75 - (2 * sunrise_sunset.ROW + sunrise_sunset.GAP + sunrise_sunset.LINE) / 2)
+        if not rising:
+            top += sunrise_sunset.ROW
+        box = (0, top, 266, top + sunrise_sunset.ROW)
         return {grey for _, grey in img.crop(box).getcolors()}
 
     def test_a_time_turns_light_grey_from_its_own_minute(self):
         # Shown as 08.26 and 15.44, rounded to the nearest minute.
-        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 8, 25, 59, tzinfo=HELSINKI), left=True))
-        self.assertEqual(self.time_row_greys(datetime(2026, 11, 18, 8, 26, tzinfo=HELSINKI), left=True),
+        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 8, 25, 59, tzinfo=HELSINKI), rising=True))
+        self.assertEqual(self.time_row_greys(datetime(2026, 11, 18, 8, 26, tzinfo=HELSINKI), rising=True),
                          {draw.LIGHT, draw.WHITE})
-        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 8, 26, tzinfo=HELSINKI), left=False))
-        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 15, 43, 59, tzinfo=HELSINKI), left=False))
-        self.assertEqual(self.time_row_greys(datetime(2026, 11, 18, 15, 44, tzinfo=HELSINKI), left=False),
+        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 8, 26, tzinfo=HELSINKI), rising=False))
+        self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 15, 43, 59, tzinfo=HELSINKI), rising=False))
+        self.assertEqual(self.time_row_greys(datetime(2026, 11, 18, 15, 44, tzinfo=HELSINKI), rising=False),
                          {draw.LIGHT, draw.WHITE})
 
     def test_no_sunrise_is_grey_since_nothing_is_to_come(self):
         utsjoki = (69.90864, 27.02843)  # 27 July: up all night, sets at 00.43 on the 28th
         noon = datetime(2026, 7, 27, 12, tzinfo=HELSINKI)
-        self.assertEqual(self.time_row_greys(noon, left=True, place=utsjoki), {draw.LIGHT, draw.WHITE})
-        self.assertIn(draw.BLACK, self.time_row_greys(noon, left=False, place=utsjoki))
+        self.assertEqual(self.time_row_greys(noon, rising=True, place=utsjoki), {draw.LIGHT, draw.WHITE})
+        self.assertIn(draw.BLACK, self.time_row_greys(noon, rising=False, place=utsjoki))
+
+    def test_in_one_column_nothing_is_cut_short_all_year(self):
+        # One column of a six-column screen is 133 px wide, and the smallest
+        # area the widget takes is narrower still: on every day of a year in
+        # Helsinki and in Utsjoki, nothing below the times ends in "…", and the
+        # widest time fits beside its sun.
+        from glance.i18n import clock
+        width = widgets.SunriseSunset.MIN_SIZE[0] - 2 * sunrise_sunset.PAD
+        for lat, lon in ((60.16952, 24.93545), (69.90864, 27.02843)):
+            for k in range(365):
+                d = sun.day(lat, lon, date(2026, 1, 1) + timedelta(days=k), HELSINKI)
+                for language in ("en", "fi"):
+                    with self.subTest(lat=lat, on=d.date, language=language):
+                        _, lines = sunrise_sunset.fitting(sunrise_sunset.line_choices(d, language), width)
+                        self.assertFalse(any(line.endswith("…") for line in lines))
+        widest = clock("fi", datetime(2026, 1, 1, 23, 59))
+        beside = width - sunrise_sunset.horizon(True, False).width - sunrise_sunset.ICON_GAP
+        self.assertLessEqual(draw.font("display", 20).getlength(widest), beside)
 
     def test_without_the_sun_in_the_scene_it_fails_loudly(self):
         from PIL import Image, ImageDraw
@@ -1091,7 +1112,7 @@ class WidgetSizeTest(unittest.TestCase):
             sun.Day(on, None, None, timedelta(days=1), timedelta(), "day", None),
             replace(widest, sunrise=None),
         )
-        for size in ((min_w, min_h), (267, 150), (533, 150), (min_w, 450), (800, min_h)):
+        for size in ((min_w, min_h), (133, 150), (267, 150), (533, 150), (min_w, 450), (800, min_h)):
             for language in ("en", "fi"):
                 for d in days:
                     sc = replace(self.worst_case(language, False), sun=d)
@@ -1121,7 +1142,7 @@ class WidgetSizeTest(unittest.TestCase):
             (".\n" * 8 + "x", r"'x' .* 1×9 grid it gets 800×50: give it 2 rows"),
             ("h" + " ." * 11 + "\n" + (". " * 12 + "\n") * 5,
              r"'h' .* 12×6 grid it gets 67×75: give it 3 columns and 2 rows"),
-            ("w h\n" * 6 + "u h", r"'u' \(sunrise_sunset\) needs at least 240×80 px; in this 2×7 grid it gets 400×64: give it 2 rows"),
+            ("w h\n" * 6 + "u h", r"'u' \(sunrise_sunset\) needs at least 125×130 px; in this 2×7 grid it gets 400×64: give it 3 rows"),
         ):
             with self.subTest(grid=grid), self.assertRaisesRegex(ValueError, message):
                 load(grid)
