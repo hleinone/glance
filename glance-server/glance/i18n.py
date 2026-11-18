@@ -4,7 +4,7 @@ as WORDS = {"en": {...}, "fi": {...}}: a widget, a source, the status bar."""
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 
 WEEKDAYS = {
     "en": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
@@ -31,7 +31,7 @@ def date(language: str, when: datetime) -> str:
     return f"{weekday} {when.day} {MONTHS_EN[when.month - 1]}"
 
 
-def day_month(language: str, when: date) -> str:
+def day_month(language: str, when: datetime) -> str:
     """'17.1.' in Finnish, '17 Jan' in English."""
     return f"{when.day}.{when.month}." if language == "fi" else f"{when.day} {MONTHS_EN[when.month - 1][:3]}"
 

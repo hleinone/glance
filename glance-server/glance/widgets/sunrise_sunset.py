@@ -1,6 +1,6 @@
 """sunrise_sunset: today's sunrise and sunset at [location], and the day's
 length with its change since yesterday. A time already past is light grey, so
-the dark one is the one still to come. On a polar night or day, the word for
+the dark one is the one still to come; a missing sunrise ("–") is grey too. On a polar night or day, the word for
 it and when the sun next rises or sets. Calculated, not fetched (glance/sun.py)."""
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from typing import ClassVar
 from PIL import Image, ImageDraw
 
 from .. import i18n
-from ..draw import BLACK, DARK, LIGHT, Pen, fit_text, font, paste_icon, text_vcenter
+from ..draw import BLACK, DARK, LIGHT, Pen, fit_text, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
 from ..sun import Day
@@ -67,7 +67,8 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
         return
     half = width // 2
     for i, (when, rising) in enumerate(((day.sunrise, True), (day.sunset, False))):
-        past = when is not None and sc.now >= to_minute(when)
+        # No sunrise (the sun was up all night) is nothing still to come either.
+        past = when is None or sc.now >= to_minute(when)
         text = i18n.clock(sc.language, to_minute(when)) if when else "–"
         draw_time(img, d, x0 + PAD + i * half, top, half - 8, rising, text, LIGHT if past else BLACK)
     length = i18n.duration(minutes(day.length))

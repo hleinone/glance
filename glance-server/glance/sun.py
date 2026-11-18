@@ -33,7 +33,7 @@ class Day:
     # sun was up all night but sets the next, the sunset when it won't set.
     sunrise: datetime | None
     sunset: datetime | None
-    length: timedelta  # from sunrise to sunset; 0 on a polar night, 24 h when the sun doesn't set
+    length: timedelta  # from sunrise to sunset; 0 on a polar night, 24 h when it doesn't rise or set
     change: timedelta  # since yesterday
     # "night": the sun doesn't rise today; "day": it doesn't set after today's noon.
     polar: Literal["night", "day"] | None
@@ -116,11 +116,12 @@ def _events(lat: float, lon: float, on: date, tz: ZoneInfo) -> _Events:
 
 
 def _length(events: _Events) -> timedelta:
+    """As FMI counts it: a day the sun doesn't rise or doesn't set on is 24 hours."""
     if events.polar == "night":
         return timedelta()
-    rise = events.sunrise or events.noon - HALF_DAY
-    set_ = events.sunset or events.noon + HALF_DAY
-    return min(set_ - rise, timedelta(days=1))
+    if events.sunrise and events.sunset:
+        return events.sunset - events.sunrise
+    return timedelta(days=1)
 
 
 def _polar_ends(lat: float, lon: float, on: date, tz: ZoneInfo, polar: str) -> datetime | None:

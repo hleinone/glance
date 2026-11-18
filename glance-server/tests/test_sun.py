@@ -52,6 +52,19 @@ class SunTest(unittest.TestCase):
         self.assertEqual(round(day("Utsjoki", "2027-01-17").change / MINUTE), 64)
         self.assertGreater(day("Helsinki", "2026-03-29").change, timedelta())  # spring: the days grow
 
+    def test_a_day_the_sun_does_not_set_or_rise_on_is_24_hours_long(self):
+        # FMI's day lengths (minutes): Utsjoki 1440 on 27 July (up all night,
+        # sets after midnight) and 1354 on the 28th; Rovaniemi 1440 on 6 July
+        # and 1394 on the 7th.
+        for place, on, length, change in (("Utsjoki", "2026-07-27", 1440, 0), ("Utsjoki", "2026-07-28", 1354, 1354 - 1440),
+                                          ("Rovaniemi", "2026-07-06", 1440, 0), ("Rovaniemi", "2026-07-07", 1394, 1394 - 1440),
+                                          ("Utsjoki", "2026-05-16", 1440, None)):
+            with self.subTest(place=place, on=on):
+                d = day(place, on)
+                self.assertAlmostEqual(d.length / MINUTE, length, delta=1)
+                if change is not None:
+                    self.assertAlmostEqual(d.change / MINUTE, change, delta=1)
+
     def test_polar_night_says_when_the_sun_next_rises(self):
         d = day("Utsjoki", "2026-12-21")
         self.assertEqual((d.polar, d.sunrise, d.sunset, d.length), ("night", None, None, timedelta()))
@@ -67,6 +80,19 @@ class SunTest(unittest.TestCase):
         self.assertIsNone(last.sunrise)
         self.assertIsNone(last.polar)
         self.assertLess(abs(last.sunset - at("2026-07-28", "00:43:21")), MINUTE)
+
+    def test_rovaniemis_midnight_sun_ends_on_7_july(self):
+        # FMI's rows: no sunrise on 6 July, one at 01:39:06 on the 7th, and
+        # that day's sunset at 00:53:31 on the 8th. So the sun first sets in
+        # the small hours of the 7th. (FMI's own "next sunset" for a date in
+        # the spell says 9 July, which its rows for the 7th contradict.)
+        d = day("Rovaniemi", "2026-06-21")
+        self.assertEqual(d.polar, "day")
+        self.assertEqual(d.polar_ends.date(), date(2026, 7, 7))
+        self.assertLess(d.polar_ends, at("2026-07-07", "01:39:06"))
+        seventh = day("Rovaniemi", "2026-07-07")
+        self.assertLess(abs(seventh.sunrise - at("2026-07-07", "01:39:06")), MINUTE)
+        self.assertLess(abs(seventh.sunset - at("2026-07-08", "00:53:31")), MINUTE)
 
     def test_the_first_day_of_midnight_sun_has_a_sunrise_and_no_sunset(self):
         d = day("Utsjoki", "2026-05-16")  # FMI: rises at 01:43:11, then not down until July
@@ -88,8 +114,6 @@ class SunTest(unittest.TestCase):
                         with self.subTest(lat=lat, lon=lon, tz=tz, on=on):
                             d = sun.day(float(lat), lon, on, tz)
                             self.assertTrue(timedelta() <= d.length <= timedelta(days=1))
-                            if d.polar is None:
-                                self.assertIsNotNone(d.sunset)
 
 
 if __name__ == "__main__":

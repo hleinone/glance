@@ -857,10 +857,11 @@ class SunriseSunsetTest(unittest.TestCase):
         # FMI's sunrise for Utsjoki that day: 08:07:38.
         self.assertLess(abs(autumn.sunrise - datetime(2026, 10, 25, 8, 7, 38, tzinfo=HELSINKI)), timedelta(minutes=1))
 
-    def time_row_greys(self, now: datetime, left: bool) -> set[int]:
-        """The greys drawn where the sunrise (left) or sunset time is."""
+    def time_row_greys(self, now: datetime, left: bool, place: tuple[float, float] = (60.16952, 24.93545)) -> set[int]:
+        """The greys drawn where the sunrise (left) or sunset time is (by default
+        in Helsinki, on 18 November: 08:26:28 and 15:43:36)."""
         from PIL import Image, ImageDraw
-        d = sun.day(60.16952, 24.93545, now.date(), HELSINKI)  # Helsinki: 08:26:28 and 15:43:36
+        d = sun.day(*place, now.date(), HELSINKI)
         sc = render.Scene(now=now, language="fi", forecast=None, stops={}, sun=d)
         img = Image.new("L", (266, 150), 255)
         sunrise_sunset.draw(img, ImageDraw.Draw(img), sc, (0, 0, 266, 150), "u", widgets.SunriseSunset())
@@ -878,6 +879,12 @@ class SunriseSunsetTest(unittest.TestCase):
         self.assertIn(draw.BLACK, self.time_row_greys(datetime(2026, 11, 18, 15, 43, 59, tzinfo=HELSINKI), left=False))
         self.assertEqual(self.time_row_greys(datetime(2026, 11, 18, 15, 44, tzinfo=HELSINKI), left=False),
                          {draw.LIGHT, draw.WHITE})
+
+    def test_no_sunrise_is_grey_since_nothing_is_to_come(self):
+        utsjoki = (69.90864, 27.02843)  # 27 July: up all night, sets at 00.43 on the 28th
+        noon = datetime(2026, 7, 27, 12, tzinfo=HELSINKI)
+        self.assertEqual(self.time_row_greys(noon, left=True, place=utsjoki), {draw.LIGHT, draw.WHITE})
+        self.assertIn(draw.BLACK, self.time_row_greys(noon, left=False, place=utsjoki))
 
     def test_without_the_sun_in_the_scene_it_fails_loudly(self):
         from PIL import Image, ImageDraw
