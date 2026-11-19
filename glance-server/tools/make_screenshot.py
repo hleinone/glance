@@ -1,6 +1,6 @@
 """Render the README screenshots from sample data: a winter weekday morning
 on the example's first screen, and a summer afternoon on its second, with
-the spot prices.
+the spot prices and the sunrise and sunset at the example's location.
 
     mise run screenshot        (writes ../docs/screenshot.png and screenshot-summer.png)
 
@@ -21,7 +21,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from glance import config, render  # noqa: E402
+from glance import config, render, sun  # noqa: E402
 from glance.sources import elering, fmi  # noqa: E402
 from glance.sources.hsl import Departure, StopDepartures  # noqa: E402
 
@@ -149,6 +149,7 @@ def main() -> None:
     cfg = replace(config.load(local_overrides=False), language="en")
     DOCS.mkdir(exist_ok=True)
     for out, scene, screen in ((OUT, winter_morning(), None), (OUT_SUMMER, summer_afternoon(), "departures")):
+        scene = replace(scene, sun=sun.day(cfg.lat, cfg.lon, scene.now.date(), cfg.tz))
         render.render(cfg, scene, screen).save(out, optimize=True)
         print(f"wrote {out}")
 

@@ -89,7 +89,7 @@ trams   trams   buses  buses  trains trains
 
 [screens.departures]
 grid = """
-hours hours hours hours hours hours
+hours hours hours hours hours sun
 trams trams trams buses buses buses
 spot  spot  spot  spot  spot  spot
 """
@@ -148,6 +148,11 @@ deck = "night"
 #                       quarter hour now, and a bar per quarter hour for the next
 #                       24 hours, the cheapest hour in black (530×120). Prices from
 #                       Nord Pool's day-ahead market via Elering (no key).
+#   sunrise_sunset      today's sunrise and sunset at [location], one above the other,
+#                       and the day's length with its change since yesterday; a time
+#                       already past is light grey. On a polar night or day, when the
+#                       sun next rises or sets. Calculated, not fetched (125×130: one
+#                       column of a six-column screen).
 
 [widgets.weather]
 type = "fmi_weather_now"
@@ -172,3 +177,6 @@ codes = ["H0086"]
 
 [widgets.spot]
 type = "spot_prices"
+
+[widgets.sun]
+type = "sunrise_sunset"

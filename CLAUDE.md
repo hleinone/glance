@@ -1,6 +1,6 @@
 # Glance
 
-A wall-mounted e-paper dashboard for a home in Helsinki: FMI weather, HSL public transport departures and Finland's electricity spot prices. A small server draws the whole 800×480 screen as an image; the display wakes, downloads it, shows it and goes back to sleep.
+A wall-mounted e-paper dashboard for a home in Helsinki: FMI weather, HSL public transport departures, Finland's electricity spot prices and today's sunrise and sunset. A small server draws the whole 800×480 screen as an image; the display wakes, downloads it, shows it and goes back to sleep.
 
 This file is the overview and the rules. Each folder has its own `CLAUDE.md` with that part's details, measurements and reasons (Claude Code loads it when working in the folder): `glance-server/CLAUDE.md` and `glance-device/CLAUDE.md`. This installation's own details (hostnames, addresses, stops, schedule, times of day) are in `CLAUDE.local.md` (git-ignored).
 

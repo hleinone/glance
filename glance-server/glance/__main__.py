@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import battery, decks, render, schedule
+from . import battery, decks, render, schedule, sun
 from .config import Config, load
 from .sources import Sources, hsl
 
@@ -48,6 +48,7 @@ def scene(
         departure_clock=interval_minutes > 1,
         warnings=warnings,
         spot_prices=sources.electricity.prices,
+        sun=sun.day(cfg.lat, cfg.lon, now.date(), cfg.tz),
     )
 
 
