@@ -1,5 +1,6 @@
 """Drawing pieces shared by the widgets and the status bar: the panel's four
-greys, fonts, fitting text, pasting icons, and a pen for drawing small icons.
+greys, fonts, fitting text, a widget's heading, pasting icons, and a pen for
+drawing small icons.
 It imports nothing of ours, so every widget can use it."""
 
 from __future__ import annotations
@@ -57,6 +58,12 @@ def text_vcenter(
     anchor = f"{align}s"
     cap = -f.getbbox("H", anchor="ls")[1]
     d.text((x, cy + cap / 2), text, font=f, fill=fill, anchor=anchor)
+
+
+def heading(d: ImageDraw.ImageDraw, x: float, cy: float, text: str, max_width: float) -> None:
+    """A widget's name at its top (a stop's, a place's): bold, shrinking, then cut."""
+    f, text = fit_text(text, "bold", 19, 14, max_width)
+    text_vcenter(d, x, cy, text, f, BLACK)
 
 
 def fmt_temp(t: float | None) -> str:
