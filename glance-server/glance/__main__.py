@@ -53,30 +53,37 @@ def scene(
     )
 
 
-def refresh_periodic(sources: Sources) -> None:
+def refresh_periodic(sources: Sources, force: bool = False) -> None:
     """Every interval source's refresh at once, each in a thread of its own, so
     the round takes as long as the slowest answer rather than all of them: a
     slow FMI with several places must not push the refresher past the next
-    departures poll. Each refresh checks its own interval and handles its own
-    failures."""
+    departures poll. Each refresh checks its own interval (unless forced) and
+    handles its own failures; never raises, since the refresher thread must
+    live on."""
     def refresh(source) -> None:
         try:
-            source.refresh()
+            source.refresh(force)
         except Exception:
             log.exception("%s refresh failed", source.WHAT)
 
-    threads = [threading.Thread(target=refresh, args=(source,), daemon=True) for source in sources.periodic]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
+    started = []
+    for source in sources.periodic:
+        thread = threading.Thread(target=refresh, args=(source,), daemon=True)
+        try:
+            thread.start()
+        except RuntimeError as e:  # the service's task limit (TasksMax) reached
+            log.warning("%s refreshed without a thread of its own: %s", source.WHAT, e)
+            refresh(source)
+        else:
+            started.append(thread)
+    for thread in started:
         thread.join()
 
 
 def cmd_render(cfg: Config, args: argparse.Namespace) -> None:
     sources = Sources.make(cfg)
     if not args.offline:
-        for source in sources.periodic:
-            source.refresh(force=True)
+        refresh_periodic(sources, force=True)
         sources.transit.refresh()
     if args.screen and args.screen not in cfg.screens:
         raise SystemExit(f"no screen {args.screen!r}; the screens are: {', '.join(cfg.screens)}")
@@ -396,7 +403,10 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
         transit.refresh(wait_seconds=POLL_WAIT)
         while not stop.is_set():
             # Right after a poll, so a slow answer can't delay the next one.
-            refresh_periodic(sources)
+            try:
+                refresh_periodic(sources)
+            except Exception:
+                log.exception("refreshing the interval sources failed")
             now = datetime.now(cfg.tz)
             next_poll = schedule.next_poll(now, transit.settings.poll_lead_seconds)
             if stop.wait(max(0.0, schedule.seconds_between(now, next_poll))):

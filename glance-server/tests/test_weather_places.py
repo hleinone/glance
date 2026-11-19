@@ -356,28 +356,57 @@ class RefreshTest(unittest.TestCase):
         import time
         from types import SimpleNamespace
         from glance.__main__ import refresh_periodic
-        started = []
+        started, done = [], []
         both = threading.Barrier(2, timeout=5)
 
         class Slow:
             WHAT = "slow"
 
-            def refresh(self):
+            def refresh(self, force=False):
                 started.append(time.monotonic())
                 both.wait()  # passes only once the other has started too
+                time.sleep(0.05)
+                done.append(force)
 
         class Broken:
             WHAT = "broken"
 
-            def refresh(self):
+            def refresh(self, force=False):
                 raise RuntimeError("boom")
 
         with self.assertLogs("glance", "ERROR") as logs:
             refresh_periodic(SimpleNamespace(periodic=(Slow(), Broken(), Slow())))
         self.assertEqual(len(started), 2)
+        self.assertEqual(done, [False, False])  # the round ends when every refresh has
         # One after the other, the first would have waited for the second in vain.
         self.assertEqual(len(logs.output), 1, logs.output)
         self.assertIn("broken refresh failed", logs.output[0])
+
+    def test_a_thread_that_cannot_start_does_not_end_the_round(self):
+        # The service's task limit reached: the refresher thread must live on.
+        import threading
+        from types import SimpleNamespace
+        from glance.__main__ import refresh_periodic
+        refreshed = []
+
+        class Source:
+            WHAT = "source"
+
+            def refresh(self, force=False):
+                refreshed.append(force)
+
+        real_start, calls = threading.Thread.start, []
+
+        def start(thread):
+            calls.append(thread)
+            if len(calls) == 2:
+                raise RuntimeError("can't start new thread")
+            real_start(thread)
+
+        with mock.patch.object(threading.Thread, "start", start), self.assertLogs("glance", "WARNING") as logs:
+            refresh_periodic(SimpleNamespace(periodic=(Source(), Source(), Source())), force=True)
+        self.assertEqual(refreshed, [True] * 3)  # the one without a thread, in this one
+        self.assertIn("can't start new thread", logs.output[0])
 
 
 if __name__ == "__main__":

@@ -58,8 +58,8 @@ class ForecastRequest:
         return self.town is None and self.lat is None
 
     def label(self) -> str | None:
-        """How the status bar and the log name the place: its heading, its
-        town or its coordinates; None for [location]."""
+        """How the status bar names the place: its heading, its town or its
+        coordinates; None for [location]. (The log names it as FMI was asked.)"""
         if self.home:
             return None
         return self.name or self.town or f"{self.lat:.2f}, {self.lon:.2f}"
