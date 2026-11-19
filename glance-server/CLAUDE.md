@@ -159,5 +159,5 @@ Built and tested, but not seen happening on the running system:
 - The battery curve's low end: `full_mv` shifts readings by a constant, which may not hold where the warning appears.
 - Running since 2026-11-16 but not seen happening yet: a renumbered stop keeping its old id until the new one is found, and a widget that can't be drawn left empty (each logs a warning or an error when it happens); the parsers leaving out values they can't draw, and a departures fetch still running after a request stopped waiting for it (neither logs anything).
 - The deploy's one-time setup check and its linger warning: trying them means undoing the Pi's setup.
-- The sunrise and sunset widget: not yet on the panel or the Pi.
+- The sunrise and sunset widget, running on the Pi since 2026-11-19, with the device's next request answered. Not looked at yet on the panel: whether the light grey line drawings of a passed time read well.
 - Spot prices, running on the Pi since 2026-11-17, with the first fetch from Elering seen there. Not seen yet: tomorrow's prices appearing in the afternoon, and a failed fetch (it logs a warning).
