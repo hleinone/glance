@@ -60,7 +60,7 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
 
     kind, intensity, desc = symbol_info(hour.symbol, sc.language)
     icon_size = 76
-    paste_icon(img, weather_icon(hour.symbol, kind, intensity, icon_size), x0 + pad - 4, y0 + 8)
+    paste_icon(img, weather_icon(hour.symbol, kind, intensity, icon_size, hour.night), x0 + pad - 4, y0 + 8)
 
     # Temperature right of the icon, with today's high/low stacked right after
     # it. The temperature shrinks rather than overlap the icon or the high/low.

@@ -112,7 +112,10 @@ def parse_settings(raw: dict) -> Settings:
 
 WFS_URL = "https://opendata.fmi.fi/wfs"
 STORED_QUERY = "fmi::forecast::edited::weather::scandinavia::point::simple"
-PARAMETERS = ("Temperature", "WindSpeedMS", "WindDirection", "PoP", "WeatherSymbol3", "FeelsLike")
+PARAMETERS = ("Temperature", "WindSpeedMS", "WindDirection", "PoP", "WeatherSymbol3", "FeelsLike", "SmartSymbol")
+# FMI adds this to an hour's SmartSymbol when the sun is below the horizon
+# there then; only that is used of it, the icon comes from WeatherSymbol3.
+NIGHT = 100
 
 NS = {
     "wfs": "http://www.opengis.net/wfs/2.0",
@@ -145,6 +148,9 @@ class Hour:
     # FMI's "feels like" temperature (wind chill / heat). Defaulted so caches
     # written before it was added still load.
     feels_like: float | None = None
+    # Whether the sun is below the horizon at the forecast's place in this
+    # hour. Defaulted so caches written before it was added still load.
+    night: bool = False
 
 
 @dataclass(frozen=True)
@@ -260,6 +266,7 @@ def _parse(xml: bytes) -> list[Hour]:
     for t in sorted(by_time):
         v = by_time[t]
         symbol = v.get("WeatherSymbol3")
+        smart = v.get("SmartSymbol")
         hours.append(
             Hour(
                 time=t,
@@ -271,6 +278,7 @@ def _parse(xml: bytes) -> list[Hour]:
                 # huge one made a file name too long to look for).
                 symbol=int(symbol) if symbol is not None and 0 <= symbol < 1000 else None,
                 feels_like=v.get("FeelsLike"),
+                night=smart is not None and NIGHT <= smart < 1000,
             )
         )
     return hours

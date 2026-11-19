@@ -74,7 +74,7 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
         cx = x0 + pad + col_w * (i + 0.5)
         text_vcenter(d, cx, y0 + 24, temps[i], temp_font, BLACK, "m")
         kind, intensity, _ = symbol_info(h.symbol, sc.language)
-        paste_icon(img, weather_icon(h.symbol, kind, intensity, icon_size), round(cx - icon_size / 2), y0 + 42)
+        paste_icon(img, weather_icon(h.symbol, kind, intensity, icon_size, h.night), round(cx - icon_size / 2), y0 + 42)
         # Every hour, 0 % included: a gap would look like missing data.
         if h.pop is not None:
             pop = i18n.percent(sc.language, round(h.pop / 10) * 10)

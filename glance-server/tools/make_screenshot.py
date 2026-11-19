@@ -1,6 +1,7 @@
 """Render the README screenshots from sample data: a winter weekday morning
 on the example's first screen, and a summer afternoon on its second, with
-the spot prices and the sunrise and sunset at the example's location.
+the spot prices and the sunrise and sunset at the example's location, and the
+weather's night icons in the hours the sun is down there.
 
     mise run screenshot        (writes ../docs/screenshot.png and screenshot-summer.png)
 
@@ -144,12 +145,25 @@ def summer_afternoon() -> render.Scene:
     )
 
 
+def with_night(scene: render.Scene, cfg: config.Config) -> render.Scene:
+    """The sample forecasts' hours marked night, as FMI marks them, where the
+    sun is down at the example's location."""
+    def night(t: datetime) -> bool:
+        day = sun.day(cfg.lat, cfg.lon, t.astimezone(cfg.tz).date(), cfg.tz)
+        return not day.sunrise <= t < day.sunset
+
+    return replace(scene, forecasts={
+        where: replace(forecast, hours=[replace(h, night=night(h.time)) for h in forecast.hours])
+        for where, forecast in scene.forecasts.items()
+    })
+
+
 def main() -> None:
     # config.toml alone: its example layout, not the local one.
     cfg = replace(config.load(local_overrides=False), language="en")
     DOCS.mkdir(exist_ok=True)
     for out, scene, screen in ((OUT, winter_morning(), None), (OUT_SUMMER, summer_afternoon(), "departures")):
-        scene = replace(scene, sun=sun.day(cfg.lat, cfg.lon, scene.now.date(), cfg.tz))
+        scene = replace(with_night(scene, cfg), sun=sun.day(cfg.lat, cfg.lon, scene.now.date(), cfg.tz))
         render.render(cfg, scene, screen).save(out, optimize=True)
         print(f"wrote {out}")
 
