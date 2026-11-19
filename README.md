@@ -38,7 +38,7 @@ flowchart LR
 - **Weather:** current conditions, today's high and low, "feels like", wind,
   and an hourly forecast with chance of precipitation (as many hours as fit:
   12 in the layout above), using FMI's own weather symbols adapted for 4-grey
-  e-paper. At your location, or at another place in Finland: a town by its
+  e-paper, with a moon in place of the sun in the hours the sun is down. At your location, or at another place in Finland: a town by its
   name (`place = "Mikkeli"`) or a point (`lat`, `lon`), with a heading if you
   like (`name = "Mökki"`).
 - **Departures:** as many as fit in each stop widget (8 in the layout above),
