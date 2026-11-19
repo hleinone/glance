@@ -32,15 +32,16 @@ def scene(
     device_battery: battery.Battery | None = None, interval_minutes: int = 1,
 ) -> render.Scene:
     now = now or datetime.now(cfg.tz)
-    weather, transit = sources.weather, sources.transit
+    transit = sources.transit
     # Before the data: if a refresh lands in between, the status bar warns
     # about data a moment older than drawn, rather than missing a warning.
     warnings = sources.warnings(now, cfg.language)
     return render.Scene(
         now=now,
         language=cfg.language,
-        forecast=weather.forecast,
         stops=transit.stops(now),
+        forecasts=sources.weather.forecasts(),
+        places_not_found=sources.weather.not_found(),
         departures_live=transit.live,
         departures_fetched_at=transit.fetched_at,
         departures_stale_after=transit.stale_after,

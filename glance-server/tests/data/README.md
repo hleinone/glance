@@ -6,6 +6,9 @@ Real API responses, saved for the tests:
   Pasila, Helsinki, saved 2026-11-09. Finnish Meteorological Institute open
   data, [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/). Source:
   Finnish Meteorological Institute.
+- `fmi_place_not_found.xml`: FMI's answer (with HTTP 400) to the same forecast
+  query for a place name it doesn't know ("Tampre"), saved 2026-11-19. Same
+  licence and source.
 - `hsl_departures.json`: departures from the Digitransit routing API for
   Pasilan asema (tram platforms 32 and 34, bus platforms 31 and 36, train
   platform 2), saved 2026-11-09. Helsinki Region Transport (HSL) open data,

@@ -159,7 +159,10 @@ def _widgets(raw: dict) -> dict[str, Widget]:
         unknown = set(w) - module.SETTINGS - {"type"}
         if unknown:
             raise ValueError(f"widget {name!r} ({kind}): unknown setting(s) {', '.join(sorted(unknown))}")
-        widgets[name] = module.parse(w)
+        try:
+            widgets[name] = module.parse(w)
+        except ValueError as e:
+            raise ValueError(f"widget {name!r} ({kind}): {e}") from None
     return widgets
 
 

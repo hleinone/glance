@@ -1,5 +1,6 @@
 """fmi_weather_hourly: hour-by-hour forecast from FMI, as many hours as fit:
-temperature, icon, chance of precipitation, hour."""
+temperature, icon, chance of precipitation, hour; at [location] or at the town
+in `place`."""
 
 from __future__ import annotations
 
@@ -12,11 +13,15 @@ from .. import i18n
 from ..draw import BLACK, DARK, font, fit_text, fmt_temp, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
-from ..sources.fmi import ForecastRequest
+from ..sources.fmi import HOME, ForecastRequest, parse_request
 from .fmi_symbols import symbol_info, weather_icon
 
 TYPE = "fmi_weather_hourly"
-SETTINGS: set[str] = set()  # besides `type`
+WORDS = {
+    "en": {"not_found": "Place “{place}” not found"},
+    "fi": {"not_found": "Paikkaa ”{place}” ei löytynyt"},
+}
+SETTINGS = {"place"}  # besides `type`
 
 # Columns at least this wide: 12 hours in 4 of 6 grid columns, as before
 # layouts were configurable.
@@ -26,12 +31,12 @@ HOUR_COLUMN_MIN_W = 41
 @dataclass(frozen=True)
 class FmiWeatherHourly:
     TYPE: ClassVar[str] = TYPE
-    wants: ClassVar[ForecastRequest] = ForecastRequest()
     MIN_SIZE: ClassVar[tuple[int, int]] = (139, 130)  # 3 hours
+    wants: ForecastRequest = HOME
 
 
 def parse(raw: dict) -> FmiWeatherHourly:
-    return FmiWeatherHourly()
+    return FmiWeatherHourly(parse_request(raw))
 
 
 def hours_fitting(width: int) -> int:
@@ -43,8 +48,14 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
     x0, y0, x1, y1 = rect
     pad = 8
     count = hours_fitting(x1 - x0)
-    hours = sc.forecast.upcoming(sc.now, count) if sc.forecast else []
+    fc = sc.forecasts.get(w.wants)
+    hours = fc.upcoming(sc.now, count) if fc else []
     if not hours:
+        # Otherwise empty: the status bar says the weather is missing.
+        if w.wants in sc.places_not_found:
+            text = i18n.t(WORDS, sc.language, "not_found", place=w.wants.label())
+            f, text = fit_text(text, "medium", 16, 12, x1 - x0 - 2 * pad)
+            text_vcenter(d, x0 + pad, (y0 + y1) / 2, text, f, DARK)
         return
     col_w = (x1 - x0 - 2 * pad) / count
     icon_size = 36

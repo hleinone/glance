@@ -93,7 +93,7 @@ def winter_morning() -> render.Scene:
     return render.Scene(
         now=now,
         language="en",
-        forecast=forecast,
+        forecasts={fmi.HOME: forecast},
         stops=stops,
         departures_live=True,
         departures_fetched_at=now - timedelta(seconds=19),
@@ -139,7 +139,7 @@ def summer_afternoon() -> render.Scene:
     stops = {name: replace(stop, departures=[replace(d, time=d.time + shift) for d in stop.departures])
              for name, stop in morning.stops.items()}
     return replace(
-        morning, now=now, forecast=fmi.Forecast(fetched_at=now - timedelta(minutes=6), hours=hours),
+        morning, now=now, forecasts={fmi.HOME: fmi.Forecast(fetched_at=now - timedelta(minutes=6), hours=hours)},
         stops=stops, departures_fetched_at=now - timedelta(seconds=19), battery_percent=64, spot_prices=prices,
     )
 

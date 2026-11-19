@@ -1,10 +1,11 @@
 """Data sources, one module per source: its client, its cache and its latest
 good answer. Widgets never fetch; they draw what the scene holds.
 
-A new source is a module here and a field in Sources (and in `periodic`, if
-it is refreshed on an interval), plus a field in the Scene it fills. Each
-source has `warning(now, language)`: what the status bar should say about its
-data being old or missing, or None. A source with settings of its own reads
+A new source is a module here and a field in Sources (and in `periodic` and
+`warnings`), plus a field in the Scene it fills. Each source has
+`warning(now, language)`: what the status bar should say about its data being
+old or missing, or None. The weather is one such source per place, held
+together by `fmi.Forecasts`. A source with settings of its own reads
 and checks its config section itself (`parse_settings`), and has a field in
 SourceSettings.
 """
@@ -12,13 +13,13 @@ SourceSettings.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING
 
 from . import fmi, hsl
 from .elering import Electricity
-from .fmi import Weather
+from .fmi import Forecasts
 from .hsl import Transit
 from .periodic import Periodic
 
@@ -44,23 +45,24 @@ class SourceSettings:
 class Sources:
     """Every source, made once per process."""
 
-    weather: Weather
+    weather: Forecasts
     transit: Transit
     electricity: Electricity
 
     @classmethod
     def make(cls, cfg: Config) -> Sources:
-        return cls(Weather(cfg), Transit(cfg), Electricity(cfg))
+        return cls(Forecasts(cfg), Transit(cfg), Electricity(cfg))
 
     @property
     def periodic(self) -> tuple[Periodic, ...]:
         """The sources refreshed on their own intervals, of those a widget asks for."""
-        return tuple(source for source in (self.weather, self.electricity) if source.wanted)
+        return tuple(source for source in (*self.weather.places.values(), self.electricity) if source.wanted)
 
     def warnings(self, now: datetime, language: str) -> tuple[str, ...]:
-        """What the sources a widget asks for say is old or missing, in the order of the fields."""
-        wanted = (source for f in fields(self) if (source := getattr(self, f.name)).wanted)
-        found = (source.warning(now, language) for source in wanted)
+        """What the sources a widget asks for say is old or missing: the weather,
+        place by place, then the departures and the spot prices."""
+        sources = (*self.weather.places.values(), self.transit, self.electricity)
+        found = (source.warning(now, language) for source in sources if source.wanted)
         return tuple(w for w in found if w)
 
     def data_times(self) -> tuple[datetime | None, ...]:

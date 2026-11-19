@@ -1,6 +1,6 @@
 """fmi_weather_now: current weather from FMI: icon, temperature, today's high
-and low, condition, feels like and wind. One design; in a bigger area it sits
-at the top left."""
+and low, condition, feels like and wind, at [location] or at the town in
+`place`. One design; in a bigger area it sits at the top left."""
 
 from __future__ import annotations
 
@@ -15,35 +15,38 @@ from .. import i18n
 from ..draw import BLACK, DARK, Pen, font, fit_text, fmt_temp, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
-from ..sources.fmi import ForecastRequest
+from ..sources.fmi import HOME, ForecastRequest, parse_request
 from .fmi_symbols import symbol_info, weather_icon
 
 TYPE = "fmi_weather_now"
 WORDS = {
-    "en": {"weather_unavailable": "Weather unavailable", "feels_like": "Feels like {temp}"},
-    "fi": {"weather_unavailable": "Säätietoja ei saatavilla", "feels_like": "Tuntuu kuin {temp}"},
+    "en": {"weather_unavailable": "Weather unavailable", "feels_like": "Feels like {temp}",
+           "not_found": "Place “{place}” not found"},
+    "fi": {"weather_unavailable": "Säätietoja ei saatavilla", "feels_like": "Tuntuu kuin {temp}",
+           "not_found": "Paikkaa ”{place}” ei löytynyt"},
 }
-SETTINGS: set[str] = set()  # besides `type`
+SETTINGS = {"place"}  # besides `type`
 
 
 @dataclass(frozen=True)
 class FmiWeatherNow:
     TYPE: ClassVar[str] = TYPE
-    wants: ClassVar[ForecastRequest] = ForecastRequest()
     MIN_SIZE: ClassVar[tuple[int, int]] = (245, 140)  # "−29°" untruncated next to the high/low
+    wants: ForecastRequest = HOME
 
 
 def parse(raw: dict) -> FmiWeatherNow:
-    return FmiWeatherNow()
+    return FmiWeatherNow(parse_request(raw))
 
 
 def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: str, w: FmiWeatherNow) -> None:
     x0, y0, x1, y1 = rect
     pad = 12
-    fc = sc.forecast
+    fc = sc.forecasts.get(w.wants)
     hour = fc.current(sc.now) if fc else None
     if hour is None:
-        f, text = fit_text(i18n.t(WORDS, sc.language, "weather_unavailable"), "medium", 16, 12, x1 - x0 - 2 * pad)
+        key = "not_found" if w.wants in sc.places_not_found else "weather_unavailable"
+        f, text = fit_text(i18n.t(WORDS, sc.language, key, place=w.wants.label()), "medium", 16, 12, x1 - x0 - 2 * pad)
         text_vcenter(d, x0 + pad, (y0 + y1) / 2, text, f, DARK)
         return
 
