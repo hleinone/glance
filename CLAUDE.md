@@ -41,9 +41,9 @@ A home network: the server has no login and speaks plain HTTP, by choice (its cl
 
 Accepted, not fixed: anyone on the home network can view the dashboard, send a false battery level or a refresh (by adding the client header) or keep the service's threads busy; something answering at the server's address could feed the device its own image; the Wi-Fi password can be read from the device's flash over USB (flash encryption burns eFuses for good). Fixing those needs a shared secret or TLS on both sides, left out to keep the firmware trivial. A guest or IoT network for the device is the answer if it matters.
 
-## Where it stands (2026-11-18)
+## Where it stands (2026-11-19)
 
-Running: the server on the Pi as of 40f33f2 (Finland's electricity spot prices, GL-4, with each data source reading its own settings), deployed 2026-11-17; its first spot price fetch and the device's next request after it went through with no warning. The firmware on the device as of a026594 (a sound on a press in place of the refreshing mark, GL-3), flashed 2026-11-18; its paths were seen on the device with a stand-in server, except the two its review added, which are in the device's "Not yet tried" with the sleep current. What neither part has seen yet is in their lists.
+Running: the server on the Pi as of 3fa1757 (today's sunrise and sunset, GL-5), deployed 2026-11-19; the device's next request after it was answered with no warning. The firmware on the device as of a026594 (a sound on a press in place of the refreshing mark, GL-3), flashed 2026-11-18; its paths were seen on the device with a stand-in server, except the two its review added, which are in the device's "Not yet tried" with the sleep current. What neither part has seen yet is in their lists.
 
 Open:
 
