@@ -43,7 +43,7 @@ Accepted, not fixed: anyone on the home network can view the dashboard, send a f
 
 ## Where it stands (2026-11-19)
 
-Running: the server on the Pi as of 3fa1757 (today's sunrise and sunset, GL-5), deployed 2026-11-19; the device's next request after it was answered with no warning. The firmware on the device as of a026594 (a sound on a press in place of the refreshing mark, GL-3), flashed 2026-11-18; its paths were seen on the device with a stand-in server, except the two its review added, which are in the device's "Not yet tried" with the sleep current. What neither part has seen yet is in their lists.
+Running: the server on the Pi as of 8c2f31d (weather for other places, GL-7), deployed 2026-11-19; the device's next request after it was answered with no warning. The firmware on the device as of a026594 (a sound on a press in place of the refreshing mark, GL-3), flashed 2026-11-18; its paths were seen on the device with a stand-in server, except the two its review added, which are in the device's "Not yet tried" with the sleep current. What neither part has seen yet is in their lists.
 
 Open:
 
