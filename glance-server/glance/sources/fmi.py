@@ -385,7 +385,11 @@ class Weather(Periodic[Forecast]):
     def __init__(self, cfg: Config, request: ForecastRequest = HOME):
         self.cfg = cfg
         self.request = request
-        self.WHAT = "weather" if request.home else f"weather for {request.label()}"
+        # The log names the place as FMI was asked for it, not by its heading.
+        if request.home:
+            self.WHAT = "weather"
+        else:
+            self.WHAT = f"weather for {request.town or f'{request.lat:.4f}, {request.lon:.4f}'}"
         # Only fetched, and only warned about, while a widget on a screen asks for it.
         self.wanted = request in cfg.wanted(ForecastRequest).values()
         # FMI's last answer was that it knows no place of this name.
@@ -425,7 +429,7 @@ class Weather(Periodic[Forecast]):
         try:
             forecast = fetch(self._where(), self.cfg.tz, now)
         except PlaceNotFound:
-            self.not_found = True
+            self.not_found = self.request.town is not None  # only a name can be unknown
             raise
         self.not_found = False
         return forecast

@@ -54,7 +54,7 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
     hour = fc.current(sc.now) if fc else None
     if hour is None:
         key = "not_found" if w.wants in sc.places_not_found else "weather_unavailable"
-        f, text = fit_text(i18n.t(WORDS, sc.language, key, place=w.wants.label()), "medium", 16, 12, x1 - x0 - 2 * pad)
+        f, text = fit_text(i18n.t(WORDS, sc.language, key, place=w.wants.town), "medium", 16, 12, x1 - x0 - 2 * pad)
         text_vcenter(d, x0 + pad, (y0 + y1) / 2, text, f, DARK)
         return
 

@@ -146,6 +146,52 @@ class TownByNameTest(unittest.TestCase):
             sources.weather.places[fmi.ForecastRequest(town="Tampre")].refresh(force=True)
         self.assertEqual(sources.weather.not_found(), frozenset())
 
+    def test_an_unknown_town_is_quoted_as_written_under_a_heading_too(self):
+        tampre = fmi.ForecastRequest(town="Tampre", name="Äiti")
+        cfg = weather_config(self, now=widgets.FmiWeatherNow(tampre), hours=widgets.FmiWeatherHourly(tampre))
+        sources = Sources.make(cfg)
+        refused = urllib.error.HTTPError("https://opendata.fmi.fi/wfs", 400, "Bad Request", {}, io.BytesIO(NOT_FOUND))
+        with mock.patch("glance.upstream._open", side_effect=refused), self.assertLogs("glance", "WARNING") as logs:
+            sources.weather.places[tampre].refresh(force=True)
+        # The log says what was typed; the heading is the widget's own word.
+        self.assertIn("weather for Tampre fetch failed", logs.output[0])
+        from glance.__main__ import scene
+        for language, words in (("en", "Place “Tampre” not found"), ("fi", "Paikkaa ”Tampre” ei löytynyt")):
+            sc = scene(replace(cfg, language=language), sources, datetime.now(HELSINKI))
+            for module, name in ((fmi_weather_now, "now"), (fmi_weather_hourly, "hours")):
+                with self.subTest(language=language, widget=name), mock.patch.object(module, "heading"):
+                    self.assertEqual(drawn_text(module, cfg.widgets[name], sc), [words])
+
+    def test_the_log_names_a_town_by_its_name_and_a_point_by_its_coordinates(self):
+        for request, said in ((fmi.ForecastRequest(town="Koski", name="Mökki"), "weather for Koski updated: "),
+                              (fmi.ForecastRequest(lat=60.5, lon=26.25, name="Mökki"),
+                               "weather for 60.5000, 26.2500 updated: ")):
+            cfg = weather_config(self, w=widgets.FmiWeatherNow(request))
+            with mock.patch("glance.upstream._open", return_value=io.BytesIO(SAMPLE)), \
+                    self.assertLogs("glance", "INFO") as logs:
+                Sources.make(cfg).weather.places[request].refresh(force=True)
+            with self.subTest(request=request):
+                self.assertIn(said, logs.output[-1])
+
+    def test_only_a_town_can_be_an_unknown_place(self):
+        # FMI's words for an unknown name, were it ever to say them for coordinates.
+        for request in (fmi.HOME, fmi.ForecastRequest(lat=60.5, lon=26.25)):
+            cfg = weather_config(self, w=widgets.FmiWeatherNow(request))
+            sources = Sources.make(cfg)
+            refused = urllib.error.HTTPError("https://opendata.fmi.fi/wfs", 400, "Bad", {}, io.BytesIO(NOT_FOUND))
+            with mock.patch("glance.upstream._open", side_effect=refused), self.assertLogs("glance", "WARNING"):
+                sources.weather.places[request].refresh(force=True)
+            with self.subTest(request=request):
+                self.assertEqual(sources.weather.not_found(), frozenset())
+
+    def test_other_places_keep_their_cache_files_names(self):
+        # Changing how a name is made would lose every cached place at a deploy.
+        self.assertEqual(fmi.cache_name(fmi.HOME), "forecast.json")
+        self.assertEqual(fmi.cache_name(fmi.ForecastRequest(name="Koti")), "forecast.json")
+        self.assertEqual(fmi.cache_name(MIKKELI), "forecast-2cc813418d4080b4.json")
+        self.assertEqual(fmi.cache_name(fmi.ForecastRequest(lat=60.5, lon=26.25, name="Mökki")),
+                         "forecast-c25179b92f3263eb.json")
+
     def test_other_failures_are_not_said_to_be_an_unknown_town(self):
         cfg = weather_config(self, now=widgets.FmiWeatherNow(MIKKELI), hours=widgets.FmiWeatherHourly(MIKKELI))
         sources = Sources.make(cfg)
@@ -302,6 +348,36 @@ class PlaceConfigTest(unittest.TestCase):
         with self.assertRaises(ValueError) as e:
             Sources.make(weather_config(self, **towns))
         self.assertEqual(str(e.exception), "the weather widgets on the screens ask for 9 places; at most 8 can be shown")
+
+
+class RefreshTest(unittest.TestCase):
+    def test_places_are_refreshed_at_once_so_slow_answers_do_not_add_up(self):
+        import threading
+        import time
+        from types import SimpleNamespace
+        from glance.__main__ import refresh_periodic
+        started = []
+        both = threading.Barrier(2, timeout=5)
+
+        class Slow:
+            WHAT = "slow"
+
+            def refresh(self):
+                started.append(time.monotonic())
+                both.wait()  # passes only once the other has started too
+
+        class Broken:
+            WHAT = "broken"
+
+            def refresh(self):
+                raise RuntimeError("boom")
+
+        with self.assertLogs("glance", "ERROR") as logs:
+            refresh_periodic(SimpleNamespace(periodic=(Slow(), Broken(), Slow())))
+        self.assertEqual(len(started), 2)
+        # One after the other, the first would have waited for the second in vain.
+        self.assertEqual(len(logs.output), 1, logs.output)
+        self.assertIn("broken refresh failed", logs.output[0])
 
 
 if __name__ == "__main__":

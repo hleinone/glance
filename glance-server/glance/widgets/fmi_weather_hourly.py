@@ -60,7 +60,7 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
     if not hours:
         # Otherwise empty: the status bar says the weather is missing.
         if w.wants in sc.places_not_found:
-            text = i18n.t(WORDS, sc.language, "not_found", place=w.wants.label())
+            text = i18n.t(WORDS, sc.language, "not_found", place=w.wants.town)
             f, text = fit_text(text, "medium", 16, 12, x1 - x0 - 2 * pad)
             text_vcenter(d, x0 + pad, (y0 + y1) / 2, text, f, DARK)
         return

@@ -53,6 +53,25 @@ def scene(
     )
 
 
+def refresh_periodic(sources: Sources) -> None:
+    """Every interval source's refresh at once, each in a thread of its own, so
+    the round takes as long as the slowest answer rather than all of them: a
+    slow FMI with several places must not push the refresher past the next
+    departures poll. Each refresh checks its own interval and handles its own
+    failures."""
+    def refresh(source) -> None:
+        try:
+            source.refresh()
+        except Exception:
+            log.exception("%s refresh failed", source.WHAT)
+
+    threads = [threading.Thread(target=refresh, args=(source,), daemon=True) for source in sources.periodic]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+
 def cmd_render(cfg: Config, args: argparse.Namespace) -> None:
     sources = Sources.make(cfg)
     if not args.offline:
@@ -377,11 +396,7 @@ def cmd_serve(cfg: Config, args: argparse.Namespace) -> None:
         transit.refresh(wait_seconds=POLL_WAIT)
         while not stop.is_set():
             # Right after a poll, so a slow answer can't delay the next one.
-            for source in sources.periodic:
-                try:
-                    source.refresh()  # checks its own interval
-                except Exception:
-                    log.exception("%s refresh failed", source.WHAT)
+            refresh_periodic(sources)
             now = datetime.now(cfg.tz)
             next_poll = schedule.next_poll(now, transit.settings.poll_lead_seconds)
             if stop.wait(max(0.0, schedule.seconds_between(now, next_poll))):

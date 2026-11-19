@@ -1112,7 +1112,7 @@ class WidgetSizeTest(unittest.TestCase):
                         sc = self.worst_case(language, clock)
                         no_data = replace(sc, forecasts={}, stops={"w": hsl.StopDepartures("—", [])})
                         # An unknown town of the longest name, as the widget words it.
-                        unknown = replace(widget, wants=fmi.ForecastRequest(town="Ä" * fmi.TOWN_LONGEST)) \
+                        unknown = replace(widget, wants=fmi.ForecastRequest(town="Ä" * fmi.TOWN_LONGEST, name=widget.wants.name)) \
                             if isinstance(widget, (widgets.FmiWeatherNow, widgets.FmiWeatherHourly)) else widget
                         for case, drawn in ((sc, widget), (no_data, widget),
                                             (replace(no_data, places_not_found=frozenset({unknown.wants})), unknown)):
