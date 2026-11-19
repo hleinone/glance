@@ -1099,16 +1099,25 @@ class WidgetSizeTest(unittest.TestCase):
         return ImageChops.invert(img).getbbox()
 
     def test_stays_inside(self):
-        for widget in (widgets.FmiWeatherNow(), widgets.FmiWeatherHourly(), widgets.HslStops()):
+        # A heading as long as the config allows, of the tallest and widest letters.
+        headed = fmi.ForecastRequest(name="Ä" * fmi.NAME_LONGEST)
+        for widget in (widgets.FmiWeatherNow(), widgets.FmiWeatherHourly(), widgets.HslStops(),
+                       widgets.FmiWeatherNow(headed), widgets.FmiWeatherHourly(headed)):
             min_w, min_h = widget.MIN_SIZE
-            # The minimum, today's sizes, and long thin shapes either way.
-            for size in ((min_w, min_h), (267, 150), (533, 150), (267, 300), (800, min_h), (min_w, 450)):
+            # The minimum, today's sizes, and long thin shapes either way: those a config can give it.
+            sizes = ((min_w, min_h), (267, 150), (533, 150), (267, 300), (800, min_h), (min_w, 450))
+            for size in (s for s in sizes if s[0] >= min_w and s[1] >= min_h):
                 for language in ("en", "fi"):
                     for clock in (False, True):
                         sc = self.worst_case(language, clock)
-                        for case in (sc, replace(sc, forecasts={}, stops={"w": hsl.StopDepartures("—", [])})):
-                            with self.subTest(widget=type(widget).__name__, size=size, language=language, clock=clock):
-                                self.assertIsNone(self.drawn_outside(widget, size, case))
+                        no_data = replace(sc, forecasts={}, stops={"w": hsl.StopDepartures("—", [])})
+                        # An unknown town of the longest name, as the widget words it.
+                        unknown = replace(widget, wants=fmi.ForecastRequest(town="Ä" * fmi.TOWN_LONGEST)) \
+                            if isinstance(widget, (widgets.FmiWeatherNow, widgets.FmiWeatherHourly)) else widget
+                        for case, drawn in ((sc, widget), (no_data, widget),
+                                            (replace(no_data, places_not_found=frozenset({unknown.wants})), unknown)):
+                            with self.subTest(widget=drawn, size=size, language=language, clock=clock):
+                                self.assertIsNone(self.drawn_outside(drawn, size, case))
 
     def test_spot_prices_stay_inside(self):
         widget = widgets.SpotPrices()
@@ -1149,7 +1158,7 @@ class WidgetSizeTest(unittest.TestCase):
     def test_fill(self):
         self.assertEqual(fmi_weather_hourly.hours_fitting(533), 12)  # 4 of 6 columns: as before layouts were configurable
         self.assertEqual(fmi_weather_hourly.hours_fitting(267), 6)
-        self.assertEqual(fmi_weather_hourly.hours_fitting(widgets.FmiWeatherHourly.MIN_SIZE[0]), 3)
+        self.assertEqual(fmi_weather_hourly.hours_fitting(widgets.FmiWeatherHourly().MIN_SIZE[0]), 3)
         self.assertEqual(hsl_stops.departures_fitting(300), 8)  # 2 of 3 rows: as before
         self.assertEqual(hsl_stops.departures_fitting(450), 12)
         self.assertEqual(hsl_stops.departures_fitting(widgets.HslStops.MIN_SIZE[1]), 1)

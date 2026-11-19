@@ -60,6 +60,11 @@ def text_vcenter(
     d.text((x, cy + cap / 2), text, font=f, fill=fill, anchor=anchor)
 
 
+# The line a heading takes across a widget's top, when the widget has one
+# besides its own (a weather widget's place).
+HEADING_H = 28
+
+
 def heading(d: ImageDraw.ImageDraw, x: float, cy: float, text: str, max_width: float) -> None:
     """A widget's name at its top (a stop's, a place's): bold, shrinking, then cut."""
     f, text = fit_text(text, "bold", 19, 14, max_width)

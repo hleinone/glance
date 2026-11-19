@@ -1,6 +1,7 @@
 """fmi_weather_now: current weather from FMI: icon, temperature, today's high
 and low, condition, feels like and wind, at [location] or at the town in
-`place`. One design; in a bigger area it sits at the top left."""
+`place` (or at `lat`, `lon`), under `name` if it has one. One design; in a
+bigger area it sits at the top left."""
 
 from __future__ import annotations
 
@@ -12,7 +13,7 @@ from typing import ClassVar
 from PIL import Image, ImageDraw
 
 from .. import i18n
-from ..draw import BLACK, DARK, Pen, font, fit_text, fmt_temp, paste_icon, text_vcenter
+from ..draw import BLACK, DARK, HEADING_H, Pen, font, fit_text, fmt_temp, heading, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
 from ..sources.fmi import HOME, ForecastRequest, parse_request
@@ -25,14 +26,18 @@ WORDS = {
     "fi": {"weather_unavailable": "Säätietoja ei saatavilla", "feels_like": "Tuntuu kuin {temp}",
            "not_found": "Paikkaa ”{place}” ei löytynyt"},
 }
-SETTINGS = {"place"}  # besides `type`
+SETTINGS = {"place", "lat", "lon", "name"}  # besides `type`
 
 
 @dataclass(frozen=True)
 class FmiWeatherNow:
     TYPE: ClassVar[str] = TYPE
-    MIN_SIZE: ClassVar[tuple[int, int]] = (245, 140)  # "−29°" untruncated next to the high/low
     wants: ForecastRequest = HOME
+
+    @property
+    def MIN_SIZE(self) -> tuple[int, int]:
+        # "−29°" untruncated next to the high/low, under the heading if any.
+        return 245, 140 + (HEADING_H if self.wants.name else 0)
 
 
 def parse(raw: dict) -> FmiWeatherNow:
@@ -42,6 +47,9 @@ def parse(raw: dict) -> FmiWeatherNow:
 def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: str, w: FmiWeatherNow) -> None:
     x0, y0, x1, y1 = rect
     pad = 12
+    if w.wants.name:
+        heading(d, x0 + pad, y0 + HEADING_H / 2 + 1, w.wants.name, x1 - x0 - 2 * pad)
+        y0 += HEADING_H
     fc = sc.forecasts.get(w.wants)
     hour = fc.current(sc.now) if fc else None
     if hour is None:

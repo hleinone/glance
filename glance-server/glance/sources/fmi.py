@@ -18,7 +18,7 @@ import urllib.parse
 import unicodedata
 import urllib.request
 import xml.etree.ElementTree as ET
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -44,16 +44,30 @@ class Settings:
 @dataclass(frozen=True)
 class ForecastRequest:
     """What a weather widget asks this source for: the forecast for a town,
-    which FMI looks up by its name, or with none, for [location]."""
+    which FMI looks up by its name, or for a point, or with neither, for
+    [location]; and what the widget calls the place, if anything."""
     town: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    # The widget's heading. Widgets showing one place share its forecast,
+    # whatever they call it.
+    name: str | None = field(default=None, compare=False)
+
+    @property
+    def home(self) -> bool:
+        return self.town is None and self.lat is None
 
     def label(self) -> str | None:
-        """How the status bar and the log name the place; None for [location]."""
-        return self.town
+        """How the status bar and the log name the place: its heading, its
+        town or its coordinates; None for [location]."""
+        if self.home:
+            return None
+        return self.name or self.town or f"{self.lat:.2f}, {self.lon:.2f}"
 
 
 HOME = ForecastRequest()
 TOWN_LONGEST = 60
+NAME_LONGEST = 40
 # Each place is fetched every refresh_minutes: eight every 15 minutes is about
 # 770 requests a day, well inside FMI's fair use.
 MAX_PLACES = 8
@@ -61,10 +75,20 @@ MAX_PLACES = 8
 
 def parse_request(raw: dict) -> ForecastRequest:
     """A weather widget's place, from its settings: `place`, a town's name
-    ("Mikkeli"), or none for [location]."""
-    if "place" not in raw:
-        return HOME
-    return ForecastRequest(town=_name(raw["place"], "place", TOWN_LONGEST))
+    ("Mikkeli"), or `lat` and `lon`, or neither for [location]; and `name`, its
+    heading, if any."""
+    name = _name(raw["name"], "name", NAME_LONGEST) if "name" in raw else None
+    point = [key for key in ("lat", "lon") if key in raw]
+    if "place" in raw and point:
+        raise ValueError("give the place by its name (place) or by its coordinates (lat and lon), not both")
+    if "place" in raw:
+        return ForecastRequest(town=_name(raw["place"], "place", TOWN_LONGEST), name=name)
+    if len(point) == 1:
+        raise ValueError(f"{point[0]} needs {'lon' if point[0] == 'lat' else 'lat'} too")
+    if point:
+        return ForecastRequest(lat=within(raw["lat"], -90, 90, "lat", float),
+                               lon=within(raw["lon"], -180, 180, "lon", float), name=name)
+    return ForecastRequest(name=name)
 
 
 def _name(value, setting: str, longest: int) -> str:
@@ -361,8 +385,7 @@ class Weather(Periodic[Forecast]):
     def __init__(self, cfg: Config, request: ForecastRequest = HOME):
         self.cfg = cfg
         self.request = request
-        place = request.label()
-        self.WHAT = "weather" if place is None else f"weather for {place}"
+        self.WHAT = "weather" if request.home else f"weather for {request.label()}"
         # Only fetched, and only warned about, while a widget on a screen asks for it.
         self.wanted = request in cfg.wanted(ForecastRequest).values()
         # FMI's last answer was that it knows no place of this name.
@@ -375,7 +398,7 @@ class Weather(Periodic[Forecast]):
         """For the status bar: that the forecast is missing or old, else None."""
         forecast = self.forecast
         place = self.request.label()
-        at = "" if place is None else "_at"
+        at = "" if self.request.home else "_at"
         if forecast is None:
             return i18n.t(WORDS, language, "weather_unavailable" + at, place=place)
         if now - forecast.fetched_at > self.stale_after:
@@ -394,6 +417,8 @@ class Weather(Periodic[Forecast]):
     def _where(self) -> dict[str, str]:
         if self.request.town is not None:
             return {"place": self.request.town}
+        if self.request.lat is not None:
+            return latlon(self.request.lat, self.request.lon)
         return latlon(self.cfg.lat, self.cfg.lon)
 
     def _fetch(self, now: datetime) -> Forecast:
@@ -420,7 +445,7 @@ class Weather(Periodic[Forecast]):
 
     def _summary(self, forecast: Forecast) -> str:
         hours = f"{len(forecast.hours)} hours"
-        if self.request == HOME or forecast.position is None:
+        if self.request.town is None or forecast.position is None:
             return hours
         # For a town: where FMI took it to be, since it picks one place among
         # those of the same name.

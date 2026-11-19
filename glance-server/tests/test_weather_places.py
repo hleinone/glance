@@ -1,4 +1,5 @@
-"""The weather for a place other than [location]: a town by its name."""
+"""The weather for a place other than [location]: a town by its name, or a
+point by its coordinates, with the widget's heading."""
 
 import io
 import tempfile
@@ -13,6 +14,7 @@ from unittest import mock
 from PIL import Image, ImageDraw
 
 from glance import config, layout, render, widgets
+from glance.draw import HEADING_H
 from glance.sources import Sources, fmi
 from glance.widgets import fmi_weather_hourly, fmi_weather_now
 from test_glance import DATA, HELSINKI, isolated_config
@@ -165,6 +167,79 @@ class TownByNameTest(unittest.TestCase):
         self.assertNotIn("−3°", drawn_text(fmi_weather_hourly, widgets.FmiWeatherHourly(MIKKELI), sc))
 
 
+class PointAndHeadingTest(unittest.TestCase):
+    POINT = fmi.ForecastRequest(lat=60.5, lon=26.25)
+
+    def test_a_point_is_asked_for_by_its_coordinates(self):
+        cfg = weather_config(self, w=widgets.FmiWeatherHourly(self.POINT))
+        with mock.patch("glance.upstream._open", return_value=io.BytesIO(SAMPLE)) as opened:
+            for source in Sources.make(cfg).periodic:
+                source.refresh(force=True)
+        self.assertEqual(opened.call_count, 1)
+        query = requested(opened)
+        self.assertEqual(query["latlon"], ["60.5000,26.2500"])
+        self.assertNotIn("place", query)
+
+    def test_one_place_under_two_headings_is_fetched_once(self):
+        cfg = weather_config(self, a=widgets.FmiWeatherNow(replace(self.POINT, name="Mökki")),
+                             b=widgets.FmiWeatherHourly(replace(self.POINT, name="Kesäpaikka")))
+        with mock.patch.object(fmi, "fetch", return_value=forecast(datetime.now(UTC), 1.0)) as fetch:
+            for source in Sources.make(cfg).periodic:
+                source.refresh(force=True)
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_the_status_bar_names_a_point_by_its_heading_or_its_coordinates(self):
+        now = datetime.now(UTC)
+        for request, words in ((replace(self.POINT, name="Mökki"), "Weather for Mökki unavailable"),
+                               (self.POINT, "Weather for 60.50, 26.25 unavailable"),
+                               (fmi.ForecastRequest(town="Mikkeli", name="Äiti"), "Weather for Äiti unavailable"),
+                               (fmi.ForecastRequest(name="Koti"), "Weather unavailable")):
+            sources = Sources.make(weather_config(self, w=widgets.FmiWeatherNow(request)))
+            with self.subTest(request=request):
+                self.assertEqual(sources.warnings(now, "en"), (words,))
+
+    def test_the_heading_is_drawn_above_the_weather(self):
+        now = datetime(2026, 11, 19, 12, tzinfo=HELSINKI)
+        point = replace(self.POINT, name="Mökki")
+        sc = render.Scene(now=now, language="en", stops={}, forecasts={point: forecast(now, 7.0)})
+        for module, widget in ((fmi_weather_now, widgets.FmiWeatherNow), (fmi_weather_hourly, widgets.FmiWeatherHourly)):
+            with self.subTest(widget=widget.TYPE):
+                with mock.patch.object(module, "heading") as heading:
+                    texts = drawn_text(module, widget(point), sc)
+                self.assertEqual(heading.call_args.args[3], "Mökki")
+                self.assertIn("7°", texts)
+                with mock.patch.object(module, "heading") as heading:
+                    drawn_text(module, widget(self.POINT), replace(sc, forecasts={self.POINT: forecast(now, 7.0)}))
+                heading.assert_not_called()  # coordinates without a name: no heading
+
+    def test_nothing_else_is_drawn_in_the_headings_line(self):
+        now = datetime(2026, 11, 19, 12, tzinfo=HELSINKI)
+        point = replace(self.POINT, name="Mökki")
+        for module, widget in ((fmi_weather_now, widgets.FmiWeatherNow), (fmi_weather_hourly, widgets.FmiWeatherHourly)):
+            for sc in (render.Scene(now=now, language="fi", stops={}, forecasts={point: forecast(now, -29.0)}),
+                       render.Scene(now=now, language="fi", stops={}, places_not_found=frozenset({point}))):
+                img = Image.new("L", (400, 200), 255)
+                with mock.patch.object(module, "heading"):  # the heading itself left out
+                    module.draw(img, ImageDraw.Draw(img), sc, (0, 0, 400, 200), "w", widget(point))
+                top = Image.eval(img, lambda v: 255 - v).getbbox()[1]
+                with self.subTest(widget=widget.TYPE, not_found=bool(sc.places_not_found)):
+                    self.assertGreaterEqual(top, HEADING_H)
+
+    def test_a_heading_needs_a_line_more(self):
+        def load(name: str) -> config.Config:
+            path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "config.toml"
+            path.write_text("[location]\nlat = 60.2\nlon = 24.9\n"
+                            f"[widgets.w]\ntype = \"fmi_weather_now\"\nlat = 60.5\nlon = 26.25\n{name}"
+                            "[screens.main]\ngrid = \"\"\"\nw\n.\n.\n\"\"\"\n")
+            return config.load(path, local_overrides=False)
+
+        load("")  # 150 px tall: enough without a heading
+        with self.assertRaises(ValueError) as e:
+            load('name = "Mökki"\n')
+        self.assertIn("'w' (fmi_weather_now) needs at least 245×168 px", str(e.exception))
+        self.assertIn("give it 2 rows", str(e.exception))
+
+
 class PlaceConfigTest(unittest.TestCase):
     def load(self, place: str) -> config.Config:
         text = ("[location]\nlat = 60.2\nlon = 24.9\n"
@@ -189,6 +264,36 @@ class PlaceConfigTest(unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError) as e:
                 self.load(value)
             self.assertIn(message, str(e.exception))
+
+    def test_a_point_and_a_heading_are_read(self):
+        w = self.load('"x"\nname = " Mökki "').widgets["w"]  # a town named x, under a heading
+        self.assertEqual(w.wants.name, "Mökki")
+        path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "config.toml"
+        path.write_text('[location]\nlat = 60.2\nlon = 24.9\n[widgets.w]\ntype = "fmi_weather_hourly"\n'
+                        'lat = 61\nlon = 26.5\n[screens.main]\ngrid = "w"\n')
+        self.assertEqual(config.load(path, local_overrides=False).widgets["w"].wants,
+                         fmi.ForecastRequest(lat=61.0, lon=26.5))
+
+    def test_a_point_or_a_heading_that_cannot_be_right_is_refused_at_load(self):
+        for value, message in (
+            ('"Mikkeli"\nlat = 61\nlon = 27', "give the place by its name (place) or by its coordinates (lat and lon), not both"),
+            ('"Mikkeli"\nname = ""', "name must be 1 to 40 characters, not 0"),
+            (f'"Mikkeli"\nname = "{"x" * 41}"', "name must be 1 to 40 characters, not 41"),
+            ('"Mikkeli"\nname = "M\\u0000"', "has a control character"),
+            ('"Mikkeli"\nname = 7', "name must be text"),
+        ):
+            with self.subTest(value=value), self.assertRaises(ValueError) as e:
+                self.load(value)
+            self.assertIn(message, str(e.exception))
+        for point, message in (("lat = 61", "lat needs lon too"), ("lon = 27", "lon needs lat too"),
+                               ("lat = 91\nlon = 27", "lat must be -90..90, not 91.0"),
+                               ("lat = 61\nlon = \"east\"", "lon must be a number, not 'east'")):
+            path = Path(self.enterContext(tempfile.TemporaryDirectory())) / "config.toml"
+            path.write_text('[location]\nlat = 60.2\nlon = 24.9\n[widgets.w]\ntype = "fmi_weather_now"\n'
+                            f'{point}\n[screens.main]\ngrid = "w"\n')
+            with self.subTest(point=point), self.assertRaises(ValueError) as e:
+                config.load(path, local_overrides=False)
+            self.assertIn(f"widget 'w' (fmi_weather_now): {message}", str(e.exception))
 
     def test_at_most_eight_places(self):
         towns = {f"w{i}": widgets.FmiWeatherNow(fmi.ForecastRequest(town=f"Town {i}")) for i in range(8)}

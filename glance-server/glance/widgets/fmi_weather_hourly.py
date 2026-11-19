@@ -1,6 +1,6 @@
 """fmi_weather_hourly: hour-by-hour forecast from FMI, as many hours as fit:
 temperature, icon, chance of precipitation, hour; at [location] or at the town
-in `place`."""
+in `place` (or at `lat`, `lon`), under `name` if it has one."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from typing import ClassVar
 from PIL import Image, ImageDraw
 
 from .. import i18n
-from ..draw import BLACK, DARK, font, fit_text, fmt_temp, paste_icon, text_vcenter
+from ..draw import BLACK, DARK, HEADING_H, font, fit_text, fmt_temp, heading, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
 from ..sources.fmi import HOME, ForecastRequest, parse_request
@@ -21,7 +21,7 @@ WORDS = {
     "en": {"not_found": "Place “{place}” not found"},
     "fi": {"not_found": "Paikkaa ”{place}” ei löytynyt"},
 }
-SETTINGS = {"place"}  # besides `type`
+SETTINGS = {"place", "lat", "lon", "name"}  # besides `type`
 
 # Columns at least this wide: 12 hours in 4 of 6 grid columns, as before
 # layouts were configurable.
@@ -31,8 +31,12 @@ HOUR_COLUMN_MIN_W = 41
 @dataclass(frozen=True)
 class FmiWeatherHourly:
     TYPE: ClassVar[str] = TYPE
-    MIN_SIZE: ClassVar[tuple[int, int]] = (139, 130)  # 3 hours
     wants: ForecastRequest = HOME
+
+    @property
+    def MIN_SIZE(self) -> tuple[int, int]:
+        # 3 hours, under the heading if any.
+        return 139, 130 + (HEADING_H if self.wants.name else 0)
 
 
 def parse(raw: dict) -> FmiWeatherHourly:
@@ -47,6 +51,9 @@ def hours_fitting(width: int) -> int:
 def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: str, w: FmiWeatherHourly) -> None:
     x0, y0, x1, y1 = rect
     pad = 8
+    if w.wants.name:
+        heading(d, x0 + pad, y0 + HEADING_H / 2 + 1, w.wants.name, x1 - x0 - 2 * pad)
+        y0 += HEADING_H
     count = hours_fitting(x1 - x0)
     fc = sc.forecasts.get(w.wants)
     hours = fc.upcoming(sc.now, count) if fc else []

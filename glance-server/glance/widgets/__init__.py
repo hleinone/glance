@@ -3,7 +3,8 @@
     TYPE       its name in config.toml ("hsl_stops")
     SETTINGS   the settings it takes, besides `type`
     parse()    its [widgets.<name>] section -> a frozen settings object, whose
-               class carries TYPE and MIN_SIZE, and whose `wants` is what it
+               class carries TYPE, which has a MIN_SIZE (larger for a weather
+               widget with a heading), and whose `wants` is what it
                asks a source for, in that source's own type (a stop widget:
                an hsl.StopRequest); sources fetch only what is asked for
     draw()     draw(img, draw, scene, rect, widget name, settings)
