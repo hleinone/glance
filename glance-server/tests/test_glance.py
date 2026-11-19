@@ -151,7 +151,7 @@ class FMITest(unittest.TestCase):
         ):
             with mock.patch("glance.upstream._open", side_effect=failure):
                 with self.assertRaises(fmi.FMIError):
-                    fmi.fetch(60.2, 24.9, HELSINKI)
+                    fmi.fetch(fmi.latlon(60.2, 24.9), HELSINKI)
 
     def test_cache_round_trip(self):
         fc = fmi.Forecast(datetime(2026, 11, 9, 20, tzinfo=UTC), fmi.parse((DATA / "fmi_simple.xml").read_bytes()))
@@ -863,7 +863,7 @@ class SunriseSunsetTest(unittest.TestCase):
         November: 08:26:28 and 15:43:36). At 266 px wide the day's length is one line."""
         from PIL import Image, ImageDraw
         d = sun.day(*place, now.date(), HELSINKI)
-        sc = render.Scene(now=now, language="fi", forecast=None, stops={}, sun=d)
+        sc = render.Scene(now=now, language="fi", stops={}, sun=d)
         img = Image.new("L", (266, 150), 255)
         sunrise_sunset.draw(img, ImageDraw.Draw(img), sc, (0, 0, 266, 150), "u", widgets.SunriseSunset())
         img = draw.quantise(img)
@@ -936,7 +936,7 @@ class SunriseSunsetTest(unittest.TestCase):
 
     def test_without_the_sun_in_the_scene_it_fails_loudly(self):
         from PIL import Image, ImageDraw
-        sc = render.Scene(now=datetime(2026, 11, 18, 12, tzinfo=HELSINKI), language="fi", forecast=None, stops={})
+        sc = render.Scene(now=datetime(2026, 11, 18, 12, tzinfo=HELSINKI), language="fi", stops={})
         img = Image.new("L", (266, 150), 255)
         with self.assertRaises(ValueError):
             sunrise_sunset.draw(img, ImageDraw.Draw(img), sc, (0, 0, 266, 150), "u", widgets.SunriseSunset())
@@ -1006,7 +1006,7 @@ class SpotPricesTest(unittest.TestCase):
         morning = datetime(2027, 1, 19, 8, 12, tzinfo=HELSINKI)
         values = [100.0] * 60 + [-95.0] * 4  # 08-24: the last hour, 23-24, is the cheapest; tomorrow isn't out
         prices = quarter_prices(datetime(2027, 1, 19, 8, 0, tzinfo=HELSINKI), values)
-        sc = render.Scene(now=morning, language="fi", forecast=None, stops={}, spot_prices=prices)
+        sc = render.Scene(now=morning, language="fi", stops={}, spot_prices=prices)
         texts, boxes = self.draws(sc, widgets.SpotPrices.MIN_SIZE)
         label = i18n.decimal("fi", spot_prices.cents(-95.0))
         (_, x, f, _), = [t for t in texts if t[0] == label]
@@ -1015,7 +1015,7 @@ class SpotPricesTest(unittest.TestCase):
     def test_the_cheapest_hours_price_is_left_out_where_the_known_part_is_too_narrow(self):
         late_evening = datetime(2027, 1, 19, 23, 0, tzinfo=HELSINKI)  # one hour known, tomorrow not out
         prices = quarter_prices(late_evening, [-95.0] * 4)
-        sc = render.Scene(now=late_evening, language="fi", forecast=None, stops={}, spot_prices=prices)
+        sc = render.Scene(now=late_evening, language="fi", stops={}, spot_prices=prices)
         texts, boxes = self.draws(sc, widgets.SpotPrices.MIN_SIZE)
         label = i18n.decimal("fi", spot_prices.cents(-95.0))
         self.assertEqual([t for t in texts if t[0] == label], [(label, 12 - 2, mock.ANY, "l")])  # only the price now
@@ -1024,7 +1024,7 @@ class SpotPricesTest(unittest.TestCase):
         afternoon = datetime(2027, 1, 19, 16, 0, tzinfo=HELSINKI)
         prices = quarter_prices(afternoon, [100.0] * 32)  # to midnight only
         for language, words in (("fi", "Huomisen hinnat myöhässä"), ("en", "Tomorrow's prices late")):
-            sc = render.Scene(now=afternoon, language=language, forecast=None, stops={}, spot_prices=prices)
+            sc = render.Scene(now=afternoon, language=language, stops={}, spot_prices=prices)
             texts, _ = self.draws(sc, (800, 150))
             with self.subTest(language=language):
                 self.assertIn(words, [t[0] for t in texts])
@@ -1034,7 +1034,7 @@ class SpotPricesTest(unittest.TestCase):
         early = datetime(2027, 1, 19, 6, 0, tzinfo=HELSINKI)  # 6 hours of tomorrow unknown: about 70 px
         prices = quarter_prices(early, [100.0] * 72)
         for language in ("fi", "en"):
-            sc = render.Scene(now=early, language=language, forecast=None, stops={}, spot_prices=prices)
+            sc = render.Scene(now=early, language=language, stops={}, spot_prices=prices)
             texts, _ = self.draws(sc, widgets.SpotPrices.MIN_SIZE)
             with self.subTest(language=language):
                 self.assertIn(spot_prices.WORDS[language]["tomorrow_short"], [t[0] for t in texts])
@@ -1057,7 +1057,7 @@ class SpotPricesTest(unittest.TestCase):
         for prices in (None, stale):
             for language, words in (("en", "Spot price unavailable"), ("fi", "Pörssisähkön hintaa ei saatavilla")):
                 img = Image.new("L", (800, 150), 255)
-                sc = render.Scene(now=self.NOW, language=language, forecast=None, stops={}, spot_prices=prices)
+                sc = render.Scene(now=self.NOW, language=language, stops={}, spot_prices=prices)
                 with mock.patch.object(spot_prices, "text_vcenter") as text:
                     spot_prices.draw(img, ImageDraw.Draw(img), sc, (0, 0, 800, 150), "w", widgets.SpotPrices())
                 self.assertEqual([c.args[3] for c in text.call_args_list], [words])
@@ -1085,7 +1085,7 @@ class WidgetSizeTest(unittest.TestCase):
         deps = sorted((hsl.Departure(r, h, now + timedelta(seconds=t), rt, m, tr) for r, h, t, rt, m, tr in rows),
                       key=lambda d: d.time)
         stop = hsl.StopDepartures("Itäkeskus(M) Kauppakeskus Itis, laituri 12", deps, ("subway", "rail", "tram"))
-        return render.Scene(now=now, language=language, forecast=fmi.Forecast(now, hours),
+        return render.Scene(now=now, language=language, forecasts={fmi.HOME: fmi.Forecast(now, hours)},
                             stops={"w": stop}, departure_clock=clock)
 
     def drawn_outside(self, widget, size: tuple[int, int], sc: render.Scene) -> tuple | None:
@@ -1099,16 +1099,25 @@ class WidgetSizeTest(unittest.TestCase):
         return ImageChops.invert(img).getbbox()
 
     def test_stays_inside(self):
-        for widget in (widgets.FmiWeatherNow(), widgets.FmiWeatherHourly(), widgets.HslStops()):
+        # A heading as long as the config allows, of the tallest and widest letters.
+        headed = fmi.ForecastRequest(name="Ä" * fmi.NAME_LONGEST)
+        for widget in (widgets.FmiWeatherNow(), widgets.FmiWeatherHourly(), widgets.HslStops(),
+                       widgets.FmiWeatherNow(headed), widgets.FmiWeatherHourly(headed)):
             min_w, min_h = widget.MIN_SIZE
-            # The minimum, today's sizes, and long thin shapes either way.
-            for size in ((min_w, min_h), (267, 150), (533, 150), (267, 300), (800, min_h), (min_w, 450)):
+            # The minimum, today's sizes, and long thin shapes either way: those a config can give it.
+            sizes = ((min_w, min_h), (267, 150), (533, 150), (267, 300), (800, min_h), (min_w, 450))
+            for size in (s for s in sizes if s[0] >= min_w and s[1] >= min_h):
                 for language in ("en", "fi"):
                     for clock in (False, True):
                         sc = self.worst_case(language, clock)
-                        for case in (sc, replace(sc, forecast=None, stops={"w": hsl.StopDepartures("—", [])})):
-                            with self.subTest(widget=type(widget).__name__, size=size, language=language, clock=clock):
-                                self.assertIsNone(self.drawn_outside(widget, size, case))
+                        no_data = replace(sc, forecasts={}, stops={"w": hsl.StopDepartures("—", [])})
+                        # An unknown town of the longest name, as the widget words it.
+                        unknown = replace(widget, wants=fmi.ForecastRequest(town="Ä" * fmi.TOWN_LONGEST, name=widget.wants.name)) \
+                            if isinstance(widget, (widgets.FmiWeatherNow, widgets.FmiWeatherHourly)) else widget
+                        for case, drawn in ((sc, widget), (no_data, widget),
+                                            (replace(no_data, places_not_found=frozenset({unknown.wants})), unknown)):
+                            with self.subTest(widget=drawn, size=size, language=language, clock=clock):
+                                self.assertIsNone(self.drawn_outside(drawn, size, case))
 
     def test_spot_prices_stay_inside(self):
         widget = widgets.SpotPrices()
@@ -1149,7 +1158,7 @@ class WidgetSizeTest(unittest.TestCase):
     def test_fill(self):
         self.assertEqual(fmi_weather_hourly.hours_fitting(533), 12)  # 4 of 6 columns: as before layouts were configurable
         self.assertEqual(fmi_weather_hourly.hours_fitting(267), 6)
-        self.assertEqual(fmi_weather_hourly.hours_fitting(widgets.FmiWeatherHourly.MIN_SIZE[0]), 3)
+        self.assertEqual(fmi_weather_hourly.hours_fitting(widgets.FmiWeatherHourly().MIN_SIZE[0]), 3)
         self.assertEqual(hsl_stops.departures_fitting(300), 8)  # 2 of 3 rows: as before
         self.assertEqual(hsl_stops.departures_fitting(450), 12)
         self.assertEqual(hsl_stops.departures_fitting(widgets.HslStops.MIN_SIZE[1]), 1)
@@ -1213,7 +1222,7 @@ class RenderTest(unittest.TestCase):
         self.scene = render.Scene(
             now=self.now,
             language="en",
-            forecast=fmi.Forecast(self.now - timedelta(minutes=5), hours),
+            forecasts={fmi.HOME: fmi.Forecast(self.now - timedelta(minutes=5), hours)},
             stops={w: hsl.placeholder(n, i, self.now) for i, (w, n) in enumerate(zip(self.cfg.wanted(hsl.StopRequest), "ABC"))},
             sun=sun.day(self.cfg.lat, self.cfg.lon, self.now.date(), HELSINKI),
         )
@@ -1247,7 +1256,7 @@ class RenderTest(unittest.TestCase):
         self.assertEqual(img.crop((0, 0, 800, 30)).tobytes(), whole.crop((0, 0, 800, 30)).tobytes())
 
     def test_render_without_data(self):
-        sc = replace(self.scene, forecast=None, stops={"trams": hsl.StopDepartures("Empty", [])})
+        sc = replace(self.scene, forecasts={}, stops={"trams": hsl.StopDepartures("Empty", [])})
         self.assert_panel_image(render.render(self.cfg, sc))
 
     def test_status_text(self):
@@ -1297,7 +1306,7 @@ class RenderTest(unittest.TestCase):
         second = render.render(self.cfg, self.scene, "departures", two)
         self.assertNotEqual(second.crop(box).tobytes(), dotted.crop(box).tobytes())  # the other dot filled
         # A long warning takes the room: no dots then.
-        warned = replace(self.scene, forecast=None, departures_live=True, battery_percent=10,
+        warned = replace(self.scene, forecasts={}, departures_live=True, battery_percent=10,
                          warnings=("Weather unavailable", "Departures unavailable"))
         self.assertEqual(render.render(self.cfg, warned, "home", two).tobytes(),
                          render.render(self.cfg, warned, "home").tobytes())
@@ -1642,7 +1651,7 @@ class BatteryTest(unittest.TestCase):
 
     def test_status_bar(self):
         now = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)
-        sc = render.Scene(now=now, language="fi", forecast=fmi.Forecast(now, []),
+        sc = render.Scene(now=now, language="fi", forecasts={fmi.HOME: fmi.Forecast(now, [])},
                           stops={}, battery_percent=40)
         self.assertEqual(render._status_warnings(sc), [])
         self.assertEqual(render._status_warnings(replace(sc, battery_percent=15)), ["Lataa akku"])
@@ -1896,9 +1905,9 @@ class TransitTest(unittest.TestCase):
         sources = Sources.make(cfg)
         before = sources.data_times()
         hours = fmi.parse((DATA / "fmi_simple.xml").read_bytes())
-        sources.weather.forecast = fmi.Forecast(datetime.now(UTC), hours)
+        sources.weather.places[fmi.HOME].forecast = fmi.Forecast(datetime.now(UTC), hours)
         self.assertNotEqual(sources.data_times(), before)  # so a drawing shared for a few seconds is redrawn
-        self.assertIn(sources.weather, sources.periodic)  # and the refresher refreshes it
+        self.assertIn(sources.weather.places[fmi.HOME], sources.periodic)  # and the refresher refreshes it
 
     def test_weather_says_when_its_forecast_is_missing_or_old(self):
         from glance.sources.fmi import Weather
@@ -1932,7 +1941,7 @@ class TransitTest(unittest.TestCase):
         sources = Sources.make(cfg)
         now = datetime(2026, 11, 10, 8, 0, tzinfo=UTC)
         self.assertEqual(sources.warnings(now, "en"), ("Weather unavailable", "Departures unavailable"))
-        sources.weather.forecast = fmi.Forecast(now, [])
+        sources.weather.places[fmi.HOME].forecast = fmi.Forecast(now, [])
         self.assertEqual(sources.warnings(now, "en"), ("Departures unavailable",))
 
     def test_weather_no_screen_shows_is_not_fetched_or_warned_about(self):
@@ -1960,7 +1969,6 @@ class TransitTest(unittest.TestCase):
         cfg = isolated_config(self, language="fi", digitransit_key="test", stops=[widgets.HslStops("A", ("HSL:1",))])
         sources = Sources.make(cfg)
         drawn_for = datetime(2026, 11, 10, 8, 0, tzinfo=HELSINKI)  # an image drawn ahead, not the clock now
-        sources.weather.forecast = fmi.Forecast(drawn_for, [])
         sources.transit.fetched_at = drawn_for - timedelta(minutes=12)
         self.assertEqual(scene(cfg, sources, drawn_for).warnings, ("Lähdöt 12 min vanhoja",))
 

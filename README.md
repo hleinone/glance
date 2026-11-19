@@ -38,7 +38,9 @@ flowchart LR
 - **Weather:** current conditions, today's high and low, "feels like", wind,
   and an hourly forecast with chance of precipitation (as many hours as fit:
   12 in the layout above), using FMI's own weather symbols adapted for 4-grey
-  e-paper.
+  e-paper. At your location, or at another place in Finland: a town by its
+  name (`place = "Mikkeli"`) or a point (`lat`, `lon`), with a heading if you
+  like (`name = "Mökki"`).
 - **Departures:** as many as fit in each stop widget (8 in the layout above),
   merged across platforms if you like, with HSL's vehicle pictograms.
   Realtime times are black, timetable-only grey; trams have filled route
@@ -145,7 +147,21 @@ every = 1
 
 `config.toml` documents the rest: language (`en`/`fi`), the widget types and
 their settings, more screens and decks of screens to switch between, the
-schedule, refresh intervals. `mise run render -- --screen NAME` draws one
+schedule, refresh intervals.
+
+A weather widget for another town takes its name, and a heading if you like:
+
+```toml
+[widgets.mikkeli]
+type = "fmi_weather_hourly"
+place = "Mikkeli"   # or a point: lat = 61.69 and lon = 27.27
+name = "Mikkeli"    # optional heading
+```
+
+FMI looks the name up. Where several places share it, FMI picks one, and the
+server's log says where ("weather for Koski updated: … at 61.0222, 25.1542");
+a fuller name such as "Koski Tl" picks another. A name FMI doesn't know is
+said on the widget itself. `mise run render -- --screen NAME` draws one
 screen to `glance.png`.
 
 ```bash

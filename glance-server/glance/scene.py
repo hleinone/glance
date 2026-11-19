@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
 from . import sun
@@ -14,8 +14,10 @@ from .sources.hsl import StopDepartures, stale
 class Scene:
     now: datetime  # local, aware
     language: str
-    forecast: fmi.Forecast | None
     stops: dict[str, StopDepartures]  # by stop widget name
+    # Each place's latest good forecast, by what the weather widgets ask for.
+    forecasts: dict[fmi.ForecastRequest, fmi.Forecast] = field(default_factory=dict)
+    places_not_found: frozenset[fmi.ForecastRequest] = frozenset()  # FMI knows no such town
     # Live departures: False while all stops show placeholders.
     departures_live: bool = False
     departures_fetched_at: datetime | None = None

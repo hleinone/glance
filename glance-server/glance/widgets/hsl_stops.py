@@ -12,7 +12,7 @@ from typing import ClassVar
 from PIL import Image, ImageDraw
 
 from .. import i18n
-from ..draw import BLACK, DARK, LIGHT, WHITE, font, fit_text, paste_icon, text_vcenter
+from ..draw import BLACK, DARK, LIGHT, WHITE, font, fit_text, heading, paste_icon, text_vcenter
 from ..layout import Rect
 from ..scene import Scene
 from ..sources.hsl import MODE_ORDER, Departure, StopRequest
@@ -93,8 +93,7 @@ def draw(img: Image.Image, d: ImageDraw.ImageDraw, sc: Scene, rect: Rect, name: 
             x += icon.width + 4
     if x > x0 + pad:
         x += 3
-    f, name = fit_text(stop.name, "bold", 19, 14, x1 - pad - x)
-    text_vcenter(d, x, cy, name, f, BLACK)
+    heading(d, x, cy, stop.name, x1 - pad - x)
 
     top = y0 + 34
     count = departures_fitting(y1 - y0)

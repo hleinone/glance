@@ -33,8 +33,8 @@ AREA = "fi"  # the answer has every Baltic area and Finland
 USER_AGENT = "glance-dashboard/0.1"
 # Seconds; prices are fetched in the background, nothing waits on them. TIMEOUT
 # is for each step (connecting, each read), DEADLINE for the whole answer. Less
-# than FMI's: the answer is small (~30 KB), and the refresher fetches weather and
-# prices one after the other in what is left of each minute.
+# than FMI's: the answer is small (~30 KB). The refresher fetches the prices and
+# each place's weather at the same time, in what is left of each minute.
 TIMEOUT = 5
 DEADLINE = 10
 # Today's prices are known since yesterday afternoon and tomorrow's arrive

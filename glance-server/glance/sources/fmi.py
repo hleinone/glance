@@ -1,20 +1,24 @@
 """The weather source: FMI's open data forecast (WFS, "simple" feature format,
-no API key), its cache, and the latest good forecast (Weather).
+no API key), for [location] or for a place a widget names, its cache, and the
+latest good forecast for each place the widgets ask for (Weather, one per
+place, held together by Forecasts).
 
 Docs: https://en.ilmatieteenlaitos.fi/open-data-manual
 """
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import logging
 import math
 import urllib.error
 import urllib.parse
+import unicodedata
 import urllib.request
 import xml.etree.ElementTree as ET
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, fields
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -39,7 +43,65 @@ class Settings:
 
 @dataclass(frozen=True)
 class ForecastRequest:
-    """What a weather widget asks this source for: the forecast at [location]."""
+    """What a weather widget asks this source for: the forecast for a town,
+    which FMI looks up by its name, or for a point, or with neither, for
+    [location]; and what the widget calls the place, if anything."""
+    town: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+    # The widget's heading. Widgets showing one place share its forecast,
+    # whatever they call it.
+    name: str | None = field(default=None, compare=False)
+
+    @property
+    def home(self) -> bool:
+        return self.town is None and self.lat is None
+
+    def label(self) -> str | None:
+        """How the status bar names the place: its heading, its town or its
+        coordinates; None for [location]. (The log names it as FMI was asked.)"""
+        if self.home:
+            return None
+        return self.name or self.town or f"{self.lat:.2f}, {self.lon:.2f}"
+
+
+HOME = ForecastRequest()
+TOWN_LONGEST = 60
+NAME_LONGEST = 40
+# Each place is fetched every refresh_minutes: eight every 15 minutes is about
+# 770 requests a day, well inside FMI's fair use.
+MAX_PLACES = 8
+
+
+def parse_request(raw: dict) -> ForecastRequest:
+    """A weather widget's place, from its settings: `place`, a town's name
+    ("Mikkeli"), or `lat` and `lon`, or neither for [location]; and `name`, its
+    heading, if any."""
+    name = _name(raw["name"], "name", NAME_LONGEST) if "name" in raw else None
+    point = [key for key in ("lat", "lon") if key in raw]
+    if "place" in raw and point:
+        raise ValueError("give the place by its name (place) or by its coordinates (lat and lon), not both")
+    if "place" in raw:
+        return ForecastRequest(town=_name(raw["place"], "place", TOWN_LONGEST), name=name)
+    if len(point) == 1:
+        raise ValueError(f"{point[0]} needs {'lon' if point[0] == 'lat' else 'lat'} too")
+    if point:
+        return ForecastRequest(lat=within(raw["lat"], -90, 90, "lat", float),
+                               lon=within(raw["lon"], -180, 180, "lon", float), name=name)
+    return ForecastRequest(name=name)
+
+
+def _name(value, setting: str, longest: int) -> str:
+    """A name from the config, trimmed: text of 1 to `longest` characters, with
+    nothing that could break a log line."""
+    if not isinstance(value, str):
+        raise ValueError(f"{setting} must be text, like \"Mikkeli\", not {value!r}")
+    text = value.strip()
+    if not 1 <= len(text) <= longest:
+        raise ValueError(f"{setting} must be 1 to {longest} characters, not {len(text)}")
+    if any(unicodedata.category(c).startswith("C") for c in text):
+        raise ValueError(f"{setting} {value!r} has a control character")
+    return text
 
 
 def parse_settings(raw: dict) -> Settings:
@@ -56,7 +118,11 @@ NS = {
     "wfs": "http://www.opengis.net/wfs/2.0",
     "BsWfs": "http://xml.fmi.fi/schema/wfs/2.0",
     "ows": "http://www.opengis.net/ows/1.1",
+    "gml": "http://www.opengis.net/gml/3.2",
 }
+# The start of FMI's answer for a place name it doesn't know: "No locations
+# found for the place with the requested language!"
+NOT_FOUND = "No locations found"
 
 USER_AGENT = "glance-dashboard/0.1"
 # Seconds; weather is fetched in the background, nothing waits on it. TIMEOUT
@@ -88,6 +154,9 @@ class Forecast:
     # The parameters it was fetched with: a cache from before a parameter was
     # added is refetched at once instead of waiting out the refresh interval.
     parameters: tuple[str, ...] = PARAMETERS
+    # Where FMI says the forecast is for (latitude, longitude): for a town, the
+    # place it chose among those of that name. Not cached.
+    position: tuple[float, float] | None = None
 
     def current(self, now: datetime) -> Hour | None:
         """The forecast step closest to `now`."""
@@ -112,13 +181,23 @@ class FMIError(Exception):
     pass
 
 
-def build_url(lat: float, lon: float, start: datetime, end: datetime) -> str:
+class PlaceNotFound(FMIError):
+    """FMI knows no place of the name asked for."""
+
+
+def latlon(lat: float, lon: float) -> dict[str, str]:
+    """Where a forecast is for, as FMI's parameter: a point."""
+    return {"latlon": f"{lat:.4f},{lon:.4f}"}
+
+
+def build_url(where: dict[str, str], start: datetime, end: datetime) -> str:
+    """`where`: latlon(), or {"place": a town's name}."""
     params = {
         "service": "WFS",
         "version": "2.0.0",
         "request": "getFeature",
         "storedquery_id": STORED_QUERY,
-        "latlon": f"{lat:.4f},{lon:.4f}",
+        **where,
         "parameters": ",".join(PARAMETERS),
         "timestep": "60",
         "starttime": _iso(start),
@@ -157,7 +236,8 @@ def _parse(xml: bytes) -> list[Hour]:
     root = ET.fromstring(xml)
     if root.tag == f"{{{NS['ows']}}}ExceptionReport":
         texts = [t.text or "" for t in root.iterfind(".//ows:ExceptionText", NS)]
-        raise FMIError("; ".join(texts[:1]) or "FMI returned an exception report")
+        message = "; ".join(texts[:1]) or "FMI returned an exception report"
+        raise (PlaceNotFound if message.startswith(NOT_FOUND) else FMIError)(message)
 
     by_time: dict[datetime, dict[str, float | None]] = {}
     for el in root.iterfind(".//BsWfs:BsWfsElement", NS):
@@ -196,11 +276,22 @@ def _parse(xml: bytes) -> list[Hour]:
     return hours
 
 
-def fetch(lat: float, lon: float, tz: ZoneInfo, now: datetime | None = None) -> Forecast:
-    """Fetch from local midnight today (for today's high/low) to ~36 h ahead."""
+def parse_position(xml: bytes) -> tuple[float, float] | None:
+    """Where an answer that parse() read says its forecast is for, if it says."""
+    pos = ET.fromstring(xml).findtext(".//gml:pos", namespaces=NS)
+    try:
+        lat, lon = (float(v) for v in (pos or "").split())
+    except ValueError:
+        return None
+    return lat, lon
+
+
+def fetch(where: dict[str, str], tz: ZoneInfo, now: datetime | None = None) -> Forecast:
+    """Fetch from local midnight today (for today's high/low) to ~36 h ahead.
+    `where` as for build_url()."""
     now = now or datetime.now(UTC)
     local_midnight = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
-    url = build_url(lat, lon, local_midnight, now + timedelta(hours=36))
+    url = build_url(where, local_midnight, now + timedelta(hours=36))
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         body = upstream.read(req, TIMEOUT, DEADLINE)
@@ -209,8 +300,8 @@ def fetch(lat: float, lon: float, tz: ZoneInfo, now: datetime | None = None) -> 
         # in front of it may answer with anything.
         try:
             parse(upstream.read_error(e, DEADLINE))
-        except FMIError as fe:
-            raise FMIError(f"HTTP {e.code}: {fe}") from e
+        except FMIError as fe:  # PlaceNotFound stays one
+            raise type(fe)(f"HTTP {e.code}: {fe}") from e
         except (OSError, http.client.HTTPException):
             pass
         raise FMIError(f"HTTP {e.code}") from e
@@ -220,7 +311,7 @@ def fetch(lat: float, lon: float, tz: ZoneInfo, now: datetime | None = None) -> 
     hours = parse(body)
     if not hours:
         raise FMIError("forecast contained no data")
-    return Forecast(fetched_at=now, hours=hours)
+    return Forecast(fetched_at=now, hours=hours, position=parse_position(body))
 
 
 # --- cache -----------------------------------------------------------------
@@ -263,33 +354,60 @@ def load_cache(path: Path) -> Forecast | None:
 # --- the latest good forecast ----------------------------------------------
 
 WORDS = {
-    "en": {"weather_old": "Weather {age} old", "weather_unavailable": "Weather unavailable"},
-    "fi": {"weather_old": "Sää {age} vanha", "weather_unavailable": "Säätietoja ei saatavilla"},
+    "en": {
+        "weather_old": "Weather {age} old",
+        "weather_unavailable": "Weather unavailable",
+        "weather_old_at": "Weather for {place} {age} old",
+        "weather_unavailable_at": "Weather for {place} unavailable",
+    },
+    "fi": {
+        "weather_old": "Sää {age} vanha",
+        "weather_unavailable": "Säätietoja ei saatavilla",
+        "weather_old_at": "Sää ({place}) {age} vanha",
+        "weather_unavailable_at": "Säätietoja ei saatavilla ({place})",
+    },
 }
 
 
-class Weather(Periodic[Forecast]):
-    """Holds the latest good forecast; refreshes at most every N minutes."""
+def cache_name(request: ForecastRequest) -> str:
+    """[location]'s forecast keeps the file it always had."""
+    if request == HOME:
+        return "forecast.json"
+    key = json.dumps([getattr(request, f.name) for f in fields(request) if f.compare])
+    return f"forecast-{hashlib.sha256(key.encode()).hexdigest()[:16]}.json"
 
-    WHAT = "weather"
+
+class Weather(Periodic[Forecast]):
+    """Holds the latest good forecast for one place; refreshes at most every N minutes."""
+
     ERRORS = (FMIError,)
 
-    def __init__(self, cfg: Config):
+    def __init__(self, cfg: Config, request: ForecastRequest = HOME):
         self.cfg = cfg
+        self.request = request
+        # The log names the place as FMI was asked for it, not by its heading.
+        if request.home:
+            self.WHAT = "weather"
+        else:
+            self.WHAT = f"weather for {request.town or f'{request.lat:.4f}, {request.lon:.4f}'}"
         # Only fetched, and only warned about, while a widget on a screen asks for it.
-        self.wanted = bool(cfg.wanted(ForecastRequest))
+        self.wanted = request in cfg.wanted(ForecastRequest).values()
+        # FMI's last answer was that it knows no place of this name.
+        self.not_found = False
         settings = cfg.source_settings.weather
         self.stale_after = timedelta(minutes=settings.stale_after_minutes)
-        super().__init__(timedelta(minutes=settings.refresh_minutes), cfg.cache_dir / "forecast.json")
+        super().__init__(timedelta(minutes=settings.refresh_minutes), cfg.cache_dir / cache_name(request))
 
     def warning(self, now: datetime, language: str) -> str | None:
         """For the status bar: that the forecast is missing or old, else None."""
         forecast = self.forecast
+        place = self.request.label()
+        at = "" if self.request.home else "_at"
         if forecast is None:
-            return i18n.t(WORDS, language, "weather_unavailable")
+            return i18n.t(WORDS, language, "weather_unavailable" + at, place=place)
         if now - forecast.fetched_at > self.stale_after:
             minutes = (now - forecast.fetched_at).total_seconds() / 60
-            return i18n.t(WORDS, language, "weather_old", age=i18n.age(minutes))
+            return i18n.t(WORDS, language, "weather_old" + at, age=i18n.age(minutes), place=place)
         return None
 
     @property
@@ -300,8 +418,21 @@ class Weather(Periodic[Forecast]):
     def forecast(self, forecast: Forecast | None) -> None:
         self.value = forecast
 
+    def _where(self) -> dict[str, str]:
+        if self.request.town is not None:
+            return {"place": self.request.town}
+        if self.request.lat is not None:
+            return latlon(self.request.lat, self.request.lon)
+        return latlon(self.cfg.lat, self.cfg.lon)
+
     def _fetch(self, now: datetime) -> Forecast:
-        return fetch(self.cfg.lat, self.cfg.lon, self.cfg.tz, now)
+        try:
+            forecast = fetch(self._where(), self.cfg.tz, now)
+        except PlaceNotFound:
+            self.not_found = self.request.town is not None  # only a name can be unknown
+            raise
+        self.not_found = False
+        return forecast
 
     def _load(self, path: Path) -> Forecast | None:
         return load_cache(path)
@@ -317,4 +448,32 @@ class Weather(Periodic[Forecast]):
         return forecast.parameters == PARAMETERS
 
     def _summary(self, forecast: Forecast) -> str:
-        return f"{len(forecast.hours)} hours"
+        hours = f"{len(forecast.hours)} hours"
+        if self.request.town is None or forecast.position is None:
+            return hours
+        # For a town: where FMI took it to be, since it picks one place among
+        # those of the same name.
+        return f"{hours} at {forecast.position[0]:.4f}, {forecast.position[1]:.4f}"
+
+
+class Forecasts:
+    """The weather for every place the widgets on the screens ask for, each
+    refreshed, cached and retried on its own, so one place's trouble never
+    costs another its forecast."""
+
+    def __init__(self, cfg: Config):
+        requests = dict.fromkeys(cfg.wanted(ForecastRequest).values())
+        if len(requests) > MAX_PLACES:
+            raise ValueError(
+                f"the weather widgets on the screens ask for {len(requests)} places; "
+                f"at most {MAX_PLACES} can be shown"
+            )
+        self.places = {request: Weather(cfg, request) for request in requests}
+
+    def forecasts(self) -> dict[ForecastRequest, Forecast]:
+        """The latest good forecast of each place that has one."""
+        return {request: f for request, weather in self.places.items() if (f := weather.forecast) is not None}
+
+    def not_found(self) -> frozenset[ForecastRequest]:
+        """The places FMI last said it doesn't know."""
+        return frozenset(request for request, weather in self.places.items() if weather.not_found)

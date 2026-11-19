@@ -32,7 +32,8 @@ port = 8080
 
 [fmi]
 # Weather from the Finnish Meteorological Institute (no key needed), for
-# [location].
+# [location] and for each other place a weather widget names, each fetched on
+# its own.
 refresh_minutes = 15
 # Show a "weather is old" warning in the status bar after this many minutes
 # without a successful fetch.
@@ -133,6 +134,15 @@ deck = "night"
 #
 #   fmi_weather_now     current weather, today's high/low, feels like, wind (245×140)
 #   fmi_weather_hourly  hour-by-hour forecast, as many hours as fit (139×130: 3 hours)
+#     Both show the weather at [location], or at another place:
+#     place  = a town's name, e.g. "Mikkeli", looked up by FMI. Where several
+#              places share a name, FMI picks one: the log says where
+#              ("weather for Koski updated: … at 61.0222, 25.1542"); a fuller
+#              name such as "Koski Tl" picks another.
+#     lat, lon = a point instead of a town, e.g. lat = 61.69, lon = 27.27
+#     name   = optional heading at the widget's top, e.g. "Mökki" (28 px
+#              taller minimum). Without it there is none, for a town too.
+#     At most 8 places in all. A name FMI doesn't know is said on the widget.
 #   hsl_stops           departures from HSL stops, as many as fit (200×72: one)
 #                       (needs a [digitransit] key)
 #     name   = optional display name; defaults to HSL's name for the stop. Set
@@ -159,6 +169,12 @@ type = "fmi_weather_now"
 
 [widgets.hours]
 type = "fmi_weather_hourly"
+
+# Another town's weather: on no screen here; add it to a grid to show it.
+[widgets.mikkeli]
+type = "fmi_weather_hourly"
+place = "Mikkeli"
+name = "Mikkeli"
 
 [widgets.trams]
 type = "hsl_stops"
