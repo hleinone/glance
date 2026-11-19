@@ -16,6 +16,11 @@ Adaptations, because the originals are coloured and drawn with hairlines:
 - snowflakes: black and thickened; raindrops: dark grey, black when small (told apart by
   path length: a drop is a short teardrop, a flake a long jagged outline)
 
+Each symbol with a sun also gets a night version (`<code>-night.png`): the sun's rays
+removed and its disc replaced by a crescent moon, drawn as the sun is. FMI's own night
+symbols (SmartSymbol) draw the moon as a plain disc, which on four greys reads as a sun
+without its rays.
+
 It also makes the sunrise and sunset widget's icons (icons/fmi/horizon/): symbol 1's
 sun cut at the horizon, with a horizon and a line of water; the rising disc light grey,
 the setting one black, and each also as a light grey line drawing for a time passed.
@@ -23,6 +28,7 @@ the setting one black, and each also as a light grey line drawing for a time pas
 
 from __future__ import annotations
 
+import math
 import re
 import urllib.request
 from dataclasses import dataclass
@@ -99,7 +105,7 @@ def adapt(svg: str, style: Style) -> str:
             attrs = _set(attrs, "stroke-linejoin", "round")
         elif fill == YELLOW and not seen_cloud:  # sun (rays and disc)
             attrs = _set(attrs, "fill", SUN)
-            if stroke is None:  # the rays; the disc keeps its white gap ring
+            if stroke is None:  # the rays, or the moon; the disc keeps its white gap ring
                 attrs = _set(attrs, "stroke", "#000000")
                 attrs = _set(attrs, "stroke-width", f"{style.sun}")
                 attrs = _set(attrs, "stroke-linejoin", "round")
@@ -120,20 +126,62 @@ def adapt(svg: str, style: Style) -> str:
     return re.sub(r'viewBox="0 0 37 37"', 'viewBox="-1 -1 39 39"', svg, count=1)
 
 
+CLOUD = '<path fill="#FFFFFF" stroke="#000000"'
+
+
+def crescent(cx: float, cy: float, r: float) -> str:
+    """A crescent moon centred where a sun disc of radius r was: a disc a little larger,
+    with a bite out of its upper right, filled as the sun is."""
+    outer, inner = r * 1.5, r * 1.5 * 0.82
+    bite = math.radians(-40)
+    dx, dy = math.cos(bite) * outer * 0.62, math.sin(bite) * outer * 0.62
+    d = math.hypot(dx, dy)
+    # Where the two circles cross: the crescent's horns.
+    along = (outer * outer - inner * inner + d * d) / (2 * d)
+    across = math.sqrt(outer * outer - along * along)
+    mx, my = cx + along * dx / d, cy + along * dy / d
+    (px, py), (qx, qy) = (mx + across * dy / d, my - across * dx / d), (mx - across * dy / d, my + across * dx / d)
+    return (f'<path fill="{YELLOW}" d="M{px:.3f},{py:.3f} A{outer:.3f},{outer:.3f} 0 1,0 {qx:.3f},{qy:.3f} '
+            f'A{inner:.3f},{inner:.3f} 0 0,1 {px:.3f},{py:.3f} Z"/>')
+
+
+def night(svg: str) -> str | None:
+    """The symbol at night: its sun (the rays and the disc, drawn before the cloud) replaced
+    by a crescent; None for a symbol without a sun."""
+    sky = svg[: svg.find(CLOUD)] if CLOUD in svg else svg
+    rays = re.search(rf'<polygon fill="{YELLOW}"[^>]*/>', sky)
+    disc = re.search(rf'<circle fill="{YELLOW}"[^>]*\bcx="([\d.]+)" cy="([\d.]+)" r="([\d.]+)"/>', sky)
+    if not rays or not disc:
+        return None
+    return svg.replace(rays.group(0), "", 1).replace(disc.group(0), crescent(*map(float, disc.groups())), 1)
+
+
+def symbols() -> dict[str, str]:
+    """Each symbol's source by its file name: the code, and `<code>-night` for one with a sun."""
+    out = {}
+    for code in CODES:
+        svg = (SRC / f"{code}.svg").read_text(encoding="utf-8")
+        out[str(code)] = svg
+        if (moon := night(svg)) is not None:
+            out[f"{code}-night"] = moon
+    return out
+
+
 def render_all() -> None:
+    sources = symbols()
     for style in STYLES:
-        rendered = svg_render.quicklook(
-            {str(code): adapt((SRC / f"{code}.svg").read_text(encoding="utf-8"), style) for code in CODES}
-        )
+        rendered = svg_render.quicklook({name: adapt(svg, style) for name, svg in sources.items()})
         # FMI's drawings leave wide margins; crop every icon to the same
-        # square around the union of all their ink, so they fill the space
-        # like the rest of the screen but keep their relative sizes.
-        box = svg_render.square(svg_render.ink_union(rendered.values()))
+        # square around the union of the day symbols' ink, so they fill the
+        # space like the rest of the screen but keep their relative sizes.
+        # The moon sits inside the sun's rays, so the night ones fit the same
+        # square, and adding them moves no day symbol.
+        box = svg_render.square(svg_render.ink_union(rendered[str(code)] for code in CODES))
         out_dir = OUT / str(style.size)
         out_dir.mkdir(parents=True, exist_ok=True)
-        for code, im in rendered.items():
+        for name, im in rendered.items():
             icon = im.crop(box).resize((style.size, style.size), Image.Resampling.LANCZOS)
-            icon.save(out_dir / f"{code}.png", optimize=True)
+            icon.save(out_dir / f"{name}.png", optimize=True)
 
 
 HORIZON_OUT = OUT / "horizon"
@@ -191,7 +239,8 @@ def main() -> None:
     fetch_sources()
     render_all()
     render_horizon()
-    print(f"wrote {len(CODES) * len(STYLES)} icons to {OUT.relative_to(ROOT)}/, and 4 to {HORIZON_OUT.relative_to(ROOT)}/")
+    count = len(symbols()) * len(STYLES)
+    print(f"wrote {count} icons to {OUT.relative_to(ROOT)}/, and 4 to {HORIZON_OUT.relative_to(ROOT)}/")
 
 
 if __name__ == "__main__":

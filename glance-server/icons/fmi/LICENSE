@@ -2,7 +2,8 @@ Weather symbols in this directory: FMI WeatherSymbol3 symbols from
 https://github.com/fmidev/opendata-resources (symbols/WeatherSymbol3).
 src/ holds the original SVGs with Adobe Illustrator private data removed;
 36/ and 76/ are modified versions (greyscale, thicker lines, cropped),
-built by tools/build_fmi_icons.py.
+built by tools/build_fmi_icons.py; their <code>-night.png are the symbols
+with a sun, the sun replaced by a crescent moon.
 
 Original licence (LICENCE.md in that repository):
 
