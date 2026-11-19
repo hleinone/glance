@@ -3,7 +3,8 @@ WeatherSymbol3 code is called in English and Finnish (`symbol_info`), and its
 picture.
 
 FMI's own WeatherSymbol3 symbols are adapted for 4-grey e-paper and
-pre-rendered to PNG by tools/build_fmi_icons.py (`fmi_symbol`). The drawings
+pre-rendered to PNG by tools/build_fmi_icons.py (`fmi_symbol`), with a night
+version, a moon in place of the sun, of each that shows a sun. The drawings
 below (`drawn`) are the fallback for a code or size without a PNG.
 """
 
@@ -60,17 +61,22 @@ def symbol_info(code: int | None, language: str) -> tuple[str, int, str]:
 FMI_DIR = Path(__file__).resolve().parent.parent.parent / "icons" / "fmi"
 
 
-def weather_icon(code: int | None, kind: str, intensity: int, size: int) -> Image.Image:
-    """FMI's symbol when one is pre-rendered for this code and size, else our own drawing."""
-    return fmi_symbol(code, size) or drawn(kind, intensity, size)
+def weather_icon(code: int | None, kind: str, intensity: int, size: int, night: bool = False) -> Image.Image:
+    """FMI's symbol when one is pre-rendered for this code and size, at night its
+    night version where it has one, else our own drawing."""
+    for version in ((True, False) if night else (False,)):
+        if (icon := fmi_symbol(code, size, version)) is not None:
+            return icon
+    return drawn(kind, intensity, size)
 
 
 @lru_cache(maxsize=None)
-def fmi_symbol(code: int | None, size: int) -> Image.Image | None:
-    """FMI's symbol for a WeatherSymbol3 code at a pre-rendered size (76 or 36), if any."""
+def fmi_symbol(code: int | None, size: int, night: bool = False) -> Image.Image | None:
+    """FMI's symbol for a WeatherSymbol3 code at a pre-rendered size (76 or 36),
+    or its night version, if any."""
     if code is None:
         return None
-    path = FMI_DIR / str(size) / f"{code}.png"
+    path = FMI_DIR / str(size) / f"{code}{'-night' if night else ''}.png"
     if not path.exists():
         return None
     with Image.open(path) as im:
